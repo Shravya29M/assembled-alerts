@@ -1,0 +1,17 @@
+[project]
+name = "assembled-alerts"
+version = "0.1.0"
+description = "Configurable intraday alerts for contact-center team leads (take-home)."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
