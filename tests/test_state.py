@@ -78,7 +78,7 @@ def test_stale_event_that_would_alert_is_rejected() -> None:
         snapshot("09:50", tickets_waiting=30),  # would be backlog critical
     )
     assert outcomes == ["accepted", "stale"]
-    rule = BacklogRule(rule_id="backlog", scope="all_owned")
+    rule = BacklogRule(rule_id="backlog", scope="all_owned", recipient="lead_billing")
     assert evaluate(rule, state.queues["billing"], state.clock).condition == "clear"
 
 

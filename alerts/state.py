@@ -60,25 +60,33 @@ class ReplayState:
         self._first_seen: dict[str, Event] = {}  # event_id -> first event with that ID
         self._latest_ts: dict[tuple[str, str], datetime] = {}  # (family, subject) -> ts
 
+    def check(self, sourced: SourcedEvent) -> Outcome:
+        """What apply() would do with this event, without changing anything."""
+        event = sourced.event
+        # 1. Dedupe on event_id, before anything else.
+        if event.event_id in self._first_seen:
+            return "duplicate"
+        # 2. Freshness per (event family, subject). Equal timestamps are fresh.
+        latest = self._latest_ts.get((event.type, _subject_id(event)))
+        if latest is not None and event.ts < latest:
+            return "stale"
+        return "accepted"
+
     def apply(self, sourced: SourcedEvent) -> Outcome:
         """Apply one event in file order and say what happened to it."""
         event, line = sourced.event, sourced.line_number
+        outcome = self.check(sourced)
 
-        # 1. Dedupe on event_id, before anything else.
-        first = self._first_seen.get(event.event_id)
-        if first is not None:
+        if outcome == "duplicate":
+            first = self._first_seen[event.event_id]
             if first != event:
                 self._record("duplicate_payload_differs", event.event_id, line,
                              f"first seen with ts {first.ts.isoformat()}, now {event.ts.isoformat()}")
-            return "duplicate"
-        self._first_seen[event.event_id] = event
-
-        # 2. Freshness per (event family, subject). Equal timestamps are fresh.
-        key = (event.type, _subject_id(event))
-        latest = self._latest_ts.get(key)
-        if latest is not None and event.ts < latest:
-            return "stale"
-        self._latest_ts[key] = event.ts
+            return outcome
+        self._first_seen[event.event_id] = event  # marked seen even if stale (Decision 21)
+        if outcome == "stale":
+            return outcome
+        self._latest_ts[(event.type, _subject_id(event))] = event.ts
 
         # 3. Monotonic clock: C = max(C, ts). Never rewinds.
         self.clock = event.ts if self.clock is None else max(self.clock, event.ts)

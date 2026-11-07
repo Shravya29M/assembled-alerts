@@ -28,7 +28,7 @@ RULE_CLASSES = [BacklogRule, SlaRule, AdherenceRule, LongCallRule]
 
 def make(rule_class: type, **overrides: Any) -> Any:
     """A valid rule of rule_class, with explicit scope, plus overrides."""
-    return rule_class(**{"rule_id": "r", "scope": "all_owned", **overrides})
+    return rule_class(**{"rule_id": "r", "scope": "all_owned", "recipient": "lead_billing", **overrides})
 
 
 def on_call_since(since: str | None) -> CallState:
@@ -68,7 +68,7 @@ def test_defaults_match_plan() -> None:
 def test_missing_scope_rejected() -> None:
     for rule_class in RULE_CLASSES:
         with pytest.raises(ValidationError):
-            rule_class(rule_id="r")
+            rule_class(rule_id="r", recipient="lead_billing")
 
 
 @pytest.mark.parametrize(

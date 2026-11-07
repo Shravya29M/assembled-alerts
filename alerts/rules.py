@@ -57,6 +57,8 @@ AllOwned = Literal["all_owned"]  # every subject the recipient owns (Phase 3)
 class _RuleBase(BaseModel):
     model_config = _STRICT
     rule_id: NonEmptyStr
+    recipient: NonEmptyStr  # the lead who is notified; checked against ownership in routing.py
+    cross_owner: bool = False  # True allows an explicit scope to name subjects the recipient does not own
     enabled: bool = True
 
 

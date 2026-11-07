@@ -97,7 +97,7 @@ def test_vip_ignores_stale_snapshot(full: tuple[ReplayState, dict[int, str]]) ->
 
 def test_billing_backlog_sequence() -> None:
     # tickets_waiting: 0, 1, 5, 12, 18, 22, 20, 19, 17, 14, 8, 9, 3
-    assert queue_conditions(BacklogRule(rule_id="backlog", scope="all_owned"), "billing") == [
+    assert queue_conditions(BacklogRule(rule_id="backlog", scope="all_owned", recipient="lead_billing"), "billing") == [
         (1, "clear"), (12, "clear"), (20, "clear"), (36, "clear"),
         (39, "warning"), (49, "critical"), (52, "warning"), (55, "warning"),
         (66, "warning"), (68, "clear"), (77, "clear"), (87, "clear"), (91, "clear"),
@@ -106,7 +106,7 @@ def test_billing_backlog_sequence() -> None:
 
 def test_billing_sla_sequence() -> None:
     # longest_wait/120: 0, 15, 90 (exactly 0.75), 90, 130, 180, 240, 260, 270, 200, 90, 110, 30
-    assert queue_conditions(SlaRule(rule_id="sla", scope="all_owned"), "billing") == [
+    assert queue_conditions(SlaRule(rule_id="sla", scope="all_owned", recipient="lead_billing"), "billing") == [
         (1, "clear"), (12, "clear"), (20, "clear"), (36, "clear"),
         (39, "critical"), (49, "critical"), (52, "critical"), (55, "critical"),
         (66, "critical"), (68, "critical"), (77, "clear"), (87, "warning"), (91, "clear"),
@@ -115,7 +115,7 @@ def test_billing_sla_sequence() -> None:
 
 def test_tier2_sla_sequence() -> None:
     # longest_wait/300: 0, 0, 60, 250, 320, 180, 60
-    assert queue_conditions(SlaRule(rule_id="sla", scope="all_owned"), "tier_2") == [
+    assert queue_conditions(SlaRule(rule_id="sla", scope="all_owned", recipient="lead_billing"), "tier_2") == [
         (2, "clear"), (13, "clear"), (21, "clear"), (54, "warning"),
         (69, "critical"), (78, "clear"), (92, "clear"),
     ]  # fmt: skip
@@ -129,19 +129,19 @@ def test_tier2_sla_sequence() -> None:
 def test_a11_long_call_met_exactly_at_0955() -> None:
     state, _ = replay(until_line=67)  # line 67 is at 09:55
     assert state.clock == at("09:55")
-    decision = evaluate(LongCallRule(rule_id="long_call", scope="all_owned"), state.calls["a_11"], state.clock)
+    decision = evaluate(LongCallRule(rule_id="long_call", scope="all_owned", recipient="lead_billing"), state.calls["a_11"], state.clock)
     assert decision == Decision("met", at("09:55"))
 
 
 def test_a19_still_in_violation_after_state_change_at_1010() -> None:
     state, _ = replay(until_line=75)  # line 75: a_19 on_break -> available at 10:10:00
-    decision = evaluate(AdherenceRule(rule_id="adherence", scope="all_owned"), state.adherence["a_19"], state.clock)
+    decision = evaluate(AdherenceRule(rule_id="adherence", scope="all_owned", recipient="lead_billing"), state.adherence["a_19"], state.clock)
     assert decision == Decision("met", at("09:45"))
 
 
 def test_a19_cleared_by_adherence_check_at_101030() -> None:
     state, _ = replay(until_line=76)  # line 76: in_violation=false at 10:10:30
-    decision = evaluate(AdherenceRule(rule_id="adherence", scope="all_owned"), state.adherence["a_19"], state.clock)
+    decision = evaluate(AdherenceRule(rule_id="adherence", scope="all_owned", recipient="lead_billing"), state.adherence["a_19"], state.clock)
     assert decision == Decision("clear")
 
 
@@ -158,7 +158,7 @@ def test_a23_call_kept_after_conflicting_check() -> None:
 
 def test_long_calls_at_end(full: tuple[ReplayState, dict[int, str]]) -> None:
     state, _ = full
-    rule = LongCallRule(rule_id="long_call", scope="all_owned")
+    rule = LongCallRule(rule_id="long_call", scope="all_owned", recipient="lead_billing")
     decisions = {agent: evaluate(rule, state.calls[agent], state.clock) for agent in AGENTS}
     assert decisions == {
         "a_05": Decision("clear"),
@@ -174,7 +174,7 @@ def test_long_calls_at_end(full: tuple[ReplayState, dict[int, str]]) -> None:
 
 def test_adherence_at_end(full: tuple[ReplayState, dict[int, str]]) -> None:
     state, _ = full
-    rule = AdherenceRule(rule_id="adherence", scope="all_owned")
+    rule = AdherenceRule(rule_id="adherence", scope="all_owned", recipient="lead_billing")
     decisions = {agent: evaluate(rule, state.adherence[agent], state.clock) for agent in AGENTS}
     assert decisions == {
         "a_05": Decision("clear"),
@@ -199,7 +199,7 @@ def test_replay_is_deterministic() -> None:
     second_state, second_outcomes = replay()
     assert first_outcomes == second_outcomes
     assert first_state.diagnostics == second_state.diagnostics
-    rule = LongCallRule(rule_id="long_call", scope="all_owned")
+    rule = LongCallRule(rule_id="long_call", scope="all_owned", recipient="lead_billing")
     assert [evaluate(rule, first_state.calls[a], first_state.clock) for a in AGENTS] == [
         evaluate(rule, second_state.calls[a], second_state.clock) for a in AGENTS
     ]
