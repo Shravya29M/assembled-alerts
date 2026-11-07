@@ -6,8 +6,10 @@ lead_support; a_07, a_19 and billing belong to lead_billing.
 
 import pytest
 
+from alerts.engine import Engine, ReplayFinishedError
+from alerts.routing import seeded_rules
 from tests.builders import adherence, at, snapshot, state_change
-from tests.engine_builders import Driver, brief
+from tests.engine_builders import Driver, brief, edited, engine_snapshot, seeded
 
 LONG_A11 = "long_call.lead_support"
 
@@ -222,3 +224,43 @@ def test_late_exit_before_deadline_records_contradiction(exit_ts: str, contradic
     assert [n.kind for n in driver.engine.notifications] == ["opened", "resolved"]
     expected = [("alert_contradicted_by_late_evidence", "a_11", 3)] if contradicted else []
     assert [(d.kind, d.subject_id, d.line_number) for d in driver.engine.diagnostics] == expected
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint 3.2 — finalization boundary (Decision 62) and construction
+# ---------------------------------------------------------------------------
+
+
+def test_step_after_finish_is_rejected_and_changes_nothing() -> None:
+    driver = Driver()
+    driver.send(a11_on_call(), quiet("09:55"))
+    driver.finish()
+    before = engine_snapshot(driver.engine)
+    with pytest.raises(ReplayFinishedError):
+        driver.send(a11_exit("09:55"))  # would otherwise resolve the alert fired at the horizon
+    assert engine_snapshot(driver.engine) == before
+
+
+def test_repeated_finish_returns_nothing_new() -> None:
+    driver = Driver()
+    driver.send(a11_on_call(), quiet("09:55"))
+    assert len(driver.finish()) == 1
+    assert driver.finish() == []
+    assert len(driver.engine.notifications) == 1
+
+
+def test_reset_allows_replay_again_with_current_rules() -> None:
+    driver = Driver()
+    driver.send(a11_on_call(), quiet("09:55"))
+    driver.finish()
+    driver.engine.update_rule(edited(LONG_A11, min_duration_sec=1800))
+    driver.engine.reset()
+    driver.line = 0
+    emitted = driver.send(a11_on_call(), quiet("09:41"))  # 30-minute rule: due 09:40
+    assert brief(emitted) == [(LONG_A11, "a_11", "opened", None, "09:40", "09:41")]
+    assert emitted[0].rule_version == 2
+
+
+def test_duplicate_rule_ids_rejected() -> None:
+    with pytest.raises(ValueError, match="duplicate rule_id"):
+        Engine([*seeded_rules(), seeded(LONG_A11)])

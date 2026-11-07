@@ -35,18 +35,41 @@ def _owners_for(rule: Rule) -> dict[str, str]:
     return QUEUE_OWNERS if isinstance(rule, (BacklogRule, SlaRule)) else AGENT_OWNERS
 
 
+def _listed(rule: Rule) -> list[str]:
+    """The subjects named by an explicit scope. Its kind already matches the rule (rules.py)."""
+    assert rule.scope != "all_owned"
+    return rule.scope.queues if isinstance(rule, (BacklogRule, SlaRule)) else rule.scope.agents
+
+
 def in_scope(rule: Rule, subject_id: str) -> bool:
     """Does this rule cover this subject? Queue rules never cover agents, and vice versa."""
     if rule.scope == "all_owned":
         return _owners_for(rule).get(subject_id) == rule.recipient
-    # An explicit scope's kind already matches the rule (validated in rules.py).
-    listed = rule.scope.queues if isinstance(rule, (BacklogRule, SlaRule)) else rule.scope.agents
-    return subject_id in listed
+    return subject_id in _listed(rule)
 
 
 def validate_routing(rule: Rule) -> None:
-    """Checkpoint 3.2 — not implemented yet."""
-    raise NotImplementedError("validate_routing is part of checkpoint 3.2")
+    """Reject a rule whose recipient or scope does not fit the ownership map (Decision 41)."""
+    if rule.recipient not in LEADS:
+        raise RoutingError(f"{rule.rule_id}: unknown recipient {rule.recipient!r}")
+    if rule.scope == "all_owned":
+        if rule.cross_owner:
+            raise RoutingError(f"{rule.rule_id}: cross_owner needs an explicit scope; "
+                               "all_owned covers only the recipient's own subjects")
+        return
+    owners = _owners_for(rule)
+    for subject_id in _listed(rule):
+        owner = owners.get(subject_id)
+        if owner is None:
+            raise RoutingError(f"{rule.rule_id}: unknown subject {subject_id!r}")
+        if owner != rule.recipient and not rule.cross_owner:
+            raise RoutingError(f"{rule.rule_id}: {subject_id} is owned by {owner}, not {rule.recipient}; "
+                               "set cross_owner to target it deliberately")
+
+
+def owner_of(subject_id: str, *, is_queue: bool) -> str | None:
+    """The seeded lead for a queue or agent, or None if nobody owns it."""
+    return (QUEUE_OWNERS if is_queue else AGENT_OWNERS).get(subject_id)
 
 
 def seeded_rules() -> list[Rule]:
