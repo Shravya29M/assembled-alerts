@@ -138,8 +138,8 @@ Python 3.12+, FastAPI, Pydantic, SQLite, pytest, stdlib heapq; a single static/s
 
 | Component                 | Responsibility                                                                |
 |---------------------------|-------------------------------------------------------------------------------|
-| ingest.py / models.py     | Typed parsing, validation, event-ID dedupe, freshness.                        |
-| state.py / clock.py       | Latest accepted operational state, replay clock, timer episodes.              |
+| ingest.py / models.py     | Typed parsing and structural validation.                                      |
+| state.py                  | Event-ID dedupe, freshness, replay clock, latest accepted operational state.  |
 | rules.py                  | Pure threshold/severity evaluation.                                           |
 | incidents.py / routing.py | Lifecycle transitions, seeded ownership, visible notification decisions.      |
 | storage.py                | SQLite transaction around processed marker, state, incident and notification. |
