@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intraday Alerts</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --line: #e2e5ea;
+    --accent: #2f5bd3; --accent-text: #ffffff; --warn: #a15c00; --warn-bg: #fff4e0;
+    --crit: #b42318; --crit-bg: #fde8e7; --ok: #1d7a46; --ok-bg: #e4f5ea; --hl: #fff8d6;
+    --info-bg: #eef2fc; --off-bg: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --text: #e6e8ec; --muted: #9aa3b2; --line: #2d333d;
+      --accent: #6d8ff0; --accent-text: #0e1117; --warn: #f0b45a; --warn-bg: #3a2c14;
+      --crit: #f38b82; --crit-bg: #3d1d1b; --ok: #6fcf97; --ok-bg: #173323; --hl: #3a3517;
+      --info-bg: #1f2738; --off-bg: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 20px 24px 8px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .sub { color: var(--muted); margin: 4px 0 0; }
+  main { padding: 0 24px 40px; display: grid; gap: 16px; max-width: 1400px; }
+  /* Grid items default to min-width: auto (their content's width), which lets a wide
+     table push the whole page past the viewport. 0 lets .table-wrap scroll instead. */
+  main > *, .two > *, .leads > * { min-width: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+
+  /* replay bar: compact; sticky only where it fits on one row (narrower, it wraps and grows) */
+  #replay { z-index: 2; padding: 10px 16px; }
+  @media (min-width: 1240px) { #replay { position: sticky; top: 0; } }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+  .label { font-size: 11px; color: var(--muted); line-height: 1.2; }
+  .clock { font: 600 22px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .progress { flex: 1 1 260px; min-width: 0; }
+  #message { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; min-height: 17px; }
+  #message.ok { color: var(--ok); }
+  #message.err { color: var(--crit); font-weight: 600; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.done, .status-resolved { background: var(--ok-bg); color: var(--ok); }
+  .badge.eoi { background: var(--warn-bg); color: var(--warn); }
+  .status-active { background: var(--crit-bg); color: var(--crit); }
+  .status-disabled { background: var(--off-bg); color: var(--muted); }
+  .counts { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; }
+  .counts b { color: var(--text); }
+  .buttons { display: flex; gap: 8px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+           padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled, button.primary:disabled { background: var(--off-bg); border-color: var(--line);
+                                             color: var(--muted); cursor: not-allowed; }
+  .explain { background: var(--info-bg); border-radius: 6px; padding: 8px 12px; margin: 0; }
+  #replay-info { display: grid; gap: 8px; padding: 12px 16px; }
+
+  /* rules */
+  .leads { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .cards { display: grid; gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  .card.disabled { opacity: .7; }
+  .card-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .card-head .id { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  .card-head label { margin-left: auto; display: flex; gap: 4px; align-items: center; cursor: pointer; }
+  .preview { margin: 6px 0; }
+  details summary { cursor: pointer; color: var(--accent); }
+  form.edit { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 8px; }
+  form.edit label { display: grid; gap: 2px; font-size: 12px; color: var(--muted); }
+  form.edit .wide { grid-column: 1 / -1; }
+  form.edit .check { display: flex; gap: 6px; align-items: center; }
+  form.edit .hint { font-size: 11px; }
+  form.edit .listed { gap: 8px; }
+  .form-actions { display: flex; gap: 12px; align-items: center; }
+  input, select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px;
+                  background: var(--bg); color: var(--text); width: 100%; }
+  input[type=checkbox], input[type=radio] { width: auto; }
+  .error { color: var(--crit); font-size: 12px; }
+  .note { color: var(--muted); font-size: 12px; }
+
+  /* tables */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  tr.new td { background: var(--hl); }
+  td.wrap { white-space: normal; }
+  .sev-warning { color: var(--warn); font-weight: 600; }
+  .sev-critical { color: var(--crit); font-weight: 600; }
+  .kind-resolved { color: var(--ok); }
+  .late { color: var(--warn); font-weight: 600; }
+  .empty { color: var(--muted); padding: 6px 0; }
+  .two { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .filters button { padding: 3px 10px; font-size: 12px; }
+  .filters button[aria-pressed="true"] { background: var(--info-bg); border-color: var(--accent); color: var(--text); }
+  @media (max-width: 640px) {
+    header, main { padding-left: 16px; padding-right: 16px; }
+    .leads, .two { grid-template-columns: 1fr; }
+    form.edit { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Intraday alerts</h1>
+  <p class="sub">Replays <code>data/events.jsonl</code> one line at a time and shows which team lead would be notified, and when.</p>
+</header>
+<main>
+  <section id="replay">
+    <div class="bar">
+      <div>
+        <div class="label">Simulated clock (UTC)</div>
+        <div class="clock" id="clock">--:--</div>
+      </div>
+      <div class="progress">
+        <div id="progress">—</div>
+        <div id="message" role="status"></div>
+      </div>
+      <div class="counts" id="counts"></div>
+      <div class="buttons">
+        <button id="step" class="primary" title="Process the next source line">Step</button>
+        <button id="run-all" title="Process every remaining line, then finish">Run All</button>
+        <button id="reset" title="Clear replay history">Reset</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="replay-info">
+    <p class="explain small" id="phase-explain"></p>
+    <div class="small muted">Reset: Replay history cleared; current rule configurations and versions are kept.</div>
+  </section>
+
+  <section>
+    <h2>Rules</h2>
+    <p class="explain small">Edits apply from the current simulated clock onward. Duration timers are recomputed from current state. Past notifications are never changed.</p>
+    <div class="leads" id="rules"></div>
+  </section>
+
+  <div class="two">
+    <section>
+      <h2>Incidents</h2>
+      <p class="small muted">An incident is one rule watching one subject. <b>Disabled</b>: the rule stopped watching it (rule disabled or subject out of scope), so it closed silently, with no notification. Duration rules have no severity.</p>
+      <div class="filters" id="incident-filters"></div>
+      <div class="table-wrap" id="incidents"></div>
+    </section>
+    <section>
+      <h2>Pending timers</h2>
+      <p class="small muted">A duration alert waits for its deadline. In this replay a timer fires only when a later line arrives (or at end of input).</p>
+      <div class="table-wrap" id="timers"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Notifications</h2>
+    <p class="small muted"><b>Effective</b> is when the condition became true. <b>Emitted</b> is when the replay could first know it.
+      All times are UTC. Rows added by the last Step are highlighted.</p>
+    <p class="small muted"><span class="late">Amber</span> Emitted time: reported later than it became true. Duration alerts fire
+      only when the next line arrives (or at end of input), so they are reported after their deadline.</p>
+    <div class="table-wrap" id="notifications"></div>
+  </section>
+
+  <section>
+    <h2>Diagnostics</h2>
+    <p class="small muted">Data-quality findings: duplicate and stale lines, missing values and contradictions. They never change an alert on their own.</p>
+    <div class="table-wrap" id="diagnostics"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const LEADS = ["lead_billing", "lead_support"];
+const TEMPLATE_ORDER = ["backlog", "sla", "adherence", "long_call"];
+const TEMPLATE_LABEL = { backlog: "Backlog", sla: "SLA", adherence: "Adherence", long_call: "Long call" };
+let highlighted = new Set();  // notification seqs added by the last Step (Run All highlights nothing)
+let lastStatus = null;        // the status as last drawn; Run All uses it to describe what it processed
+let incidentFilter = "all";
+
+// Build an element. Text is always set with textContent, never parsed as HTML.
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (key in node) node[key] = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child !== null && child !== undefined) node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+
+function hm(iso) {  // "2026-05-26T09:55:00+00:00" -> "09:55"; keeps seconds when not zero. Source times are UTC.
+  if (!iso) return "—";
+  const t = iso.slice(11, 19);
+  return t.endsWith(":00") ? t.slice(0, 5) : t;
+}
+
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
+function delay(seconds) {  // 30 -> "30 s", 300 -> "5 min", 630 -> "10 min 30 s"
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return [m ? `${m} min` : "", s ? `${s} s` : ""].filter(Boolean).join(" ");
+}
+
+async function api(method, path, body) {
+  const options = { method, headers: {} };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({ detail: response.statusText }));
+  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Request failed.");
+  return data;
+}
+
+function showMessage(text, kind) {
+  const box = document.getElementById("message");
+  box.className = kind || "ok";
+  box.textContent = text || "";
+  box.title = text || "";  // the bar truncates long messages; hover shows all of it
+}
+
+function table(headers, rows, emptyText) {
+  if (rows.length === 0) return el("div", { class: "empty" }, emptyText);
+  return el("table", {},
+    el("thead", {}, el("tr", {}, headers.map(h => el("th", {}, h)))),
+    el("tbody", {}, rows));
+}
+
+// ---------------------------------------------------------------- replay bar
+
+function renderStatus(s) {
+  lastStatus = s;
+  document.getElementById("clock").textContent = s.clock ? hm(s.clock) : "--:--";
+  const progress = document.getElementById("progress");
+  const explain = document.getElementById("phase-explain");
+  progress.replaceChildren(`Processed ${s.cursor} of ${s.total_events} lines · `);
+  if (s.next === "event") {
+    progress.append(`Next: line ${s.next_line}`);
+    explain.textContent = s.cursor === 0
+      ? "Nothing processed yet. Step processes one line; Run All processes every line and then finishes."
+      : "Step processes the next line. Timers fire only when a later line moves the clock past their deadline.";
+  } else if (s.next === "end_of_input") {
+    progress.append(el("span", { class: "badge eoi" }, "Next: end of input"));
+    explain.textContent = "End of input: every line has been processed, but the replay is not finished yet. "
+      + "The next Step finishes it: timers due at or before the final clock fire, then the replay closes.";
+  } else {
+    progress.append(el("span", { class: "badge done" }, "FINISHED"));
+    explain.textContent = "Finished: end-of-input timers have fired and the replay is closed. Step and Run All are "
+      + "disabled. Rule edits are still saved, but they cannot add notifications. Press Reset to replay again.";
+  }
+  const c = s.counts;
+  document.getElementById("counts").replaceChildren(
+    ...[[c.accepted, "accepted", "accepted"], [c.duplicate, "duplicate", "duplicates"], [c.stale, "stale", "stale"],
+        [c.active_incidents, "active incident", "active incidents"],
+        [c.notifications, "notification", "notifications"], [c.pending_timers, "timer", "timers"]]
+      .map(([n, one, many]) => el("span", {}, el("b", {}, n), " " + (n === 1 ? one : many))));
+  document.getElementById("step").disabled = s.finished;
+  document.getElementById("run-all").disabled = s.finished;
+  document.getElementById("reset").disabled = false;
+  document.getElementById("timers").replaceChildren(table(
+    ["Rule", "Subject", "Due (UTC)"],
+    s.pending_timers.map(t => el("tr", {}, el("td", {}, t.rule_id), el("td", {}, t.subject_id), el("td", {}, hm(t.due_at)))),
+    "No pending timers."));
+}
+
+// --------------------------------------------------------------------- rules
+
+function ruleCard(rule) {
+  const error = el("div", { class: "error", role: "alert" });
+  const toggle = el("input", { type: "checkbox", checked: rule.enabled, onchange: async (e) => {
+    e.target.disabled = true;
+    try {
+      await api("PATCH", `/rules/${encodeURIComponent(rule.rule_id)}`, { enabled: e.target.checked });
+      showMessage(`${rule.rule_id} ${e.target.checked ? "enabled" : "disabled"}.`, "ok");
+      await refresh();
+    } catch (err) { error.textContent = err.message; e.target.checked = !e.target.checked; e.target.disabled = false; }
+  }});
+  return el("div", { class: "card" + (rule.enabled ? "" : " disabled") },
+    el("div", { class: "card-head" },
+      el("strong", {}, TEMPLATE_LABEL[rule.template]),
+      el("span", { class: "id" }, `${rule.rule_id} · v${rule.version}`),
+      el("label", { class: "small" }, toggle, "Enabled")),
+    el("div", { class: "preview" }, rule.preview),
+    el("details", {}, el("summary", { class: "small" }, "Edit"), editForm(rule, error)),
+    error);
+}
+
+// Display <-> API conversions. Only fields the user actually changed are converted
+// and sent, so untouched values are never rounded.
+const percent = ratio => String(Math.round(ratio * 10000) / 100);   // 0.8 -> "80"
+const minutes = seconds => String(Math.round(seconds / 60 * 100) / 100);  // 2700 -> "45", 90 -> "1.5"
+const toSeconds = value => Math.round(Number(value) * 60);
+
+function editForm(rule, error) {
+  const c = rule.config;
+  const queues = rule.template === "backlog" || rule.template === "sla";
+  const originalList = c.scope === "all_owned" ? [] : (queues ? c.scope.queues : c.scope.agents);
+  const field = (label, input, extra) => el("label", {}, label, input, extra);
+  // Each number field remembers how to turn its text into the API value.
+  const numbers = [];
+  const num = (key, shown, toApi, step, extra) => {
+    const input = el("input", { type: "number", value: shown, step, min: "0", required: true });
+    numbers.push({ key, input, shown, toApi });
+    return [input, extra];
+  };
+
+  const recipient = el("select", {}, LEADS.map(l => el("option", { value: l, selected: l === c.recipient }, l)));
+  const scopeMode = el("select", {},
+    el("option", { value: "all_owned", selected: c.scope === "all_owned" }, "All subjects the recipient owns"),
+    el("option", { value: "listed", selected: c.scope !== "all_owned" }, `Listed ${queues ? "queues" : "agents"}`));
+  const scopeList = el("input", { value: originalList.join(", "), placeholder: queues ? "e.g. billing, vip" : "e.g. a_05, a_07" });
+  const crossOwner = el("input", { type: "checkbox", checked: c.cross_owner });
+  // Hidden, not removed, in all-owned mode: switching back keeps what was typed.
+  const listedFields = el("div", { class: "wide listed" },
+    el("label", {}, "Listed subjects (comma-separated)", scopeList),
+    el("label", { class: "check" }, crossOwner, "Cross-owner: allow subjects another lead owns"));
+  const syncScope = () => { listedFields.style.display = scopeMode.value === "all_owned" ? "none" : "grid"; };
+  scopeMode.addEventListener("change", syncScope);
+  syncScope();
+
+  let thresholds;
+  if (rule.template === "backlog") {
+    thresholds = [
+      field("Warning when more than (tickets)", ...num("warning_above", String(c.warning_above), Number, "1")),
+      field("Critical when more than (tickets)", ...num("critical_above", String(c.critical_above), Number, "1"))];
+  } else if (rule.template === "sla") {
+    const ratio = v => Number(v) / 100;
+    thresholds = [
+      field("Warning at or above (% of SLA target)", ...num("warning_ratio", percent(c.warning_ratio), ratio, "any")),
+      field("Critical above (% of SLA target)", ...num("critical_ratio", percent(c.critical_ratio), ratio, "any")),
+      field("Recovers at or below (% of SLA target)", ...num("resolve_ratio", percent(c.resolve_ratio), ratio, "any"))];
+  } else {
+    const hint = el("span", { class: "hint muted" }, `= ${c.min_duration_sec} seconds`);
+    const [input] = num("min_duration_sec", minutes(c.min_duration_sec), toSeconds, "any", hint);
+    input.addEventListener("input", () => {
+      hint.textContent = input.value === minutes(c.min_duration_sec)
+        ? `= ${c.min_duration_sec} seconds` : `= ${toSeconds(input.value)} seconds`;
+    });
+    thresholds = [field("Minimum duration (minutes)", input, hint)];
+  }
+
+  const status = el("span", { class: "note" });
+  const form = el("form", { class: "edit", onsubmit: async (e) => {
+    e.preventDefault();
+    error.textContent = "";
+    status.textContent = "";
+    const changes = {};
+    if (recipient.value !== c.recipient) changes.recipient = recipient.value;
+    if (scopeMode.value === "all_owned") {
+      if (c.scope !== "all_owned") changes.scope = "all_owned";
+      if (c.cross_owner) changes.cross_owner = false;  // required: cross_owner is invalid with all_owned
+    } else {
+      const names = scopeList.value.split(",").map(s => s.trim()).filter(Boolean);
+      if (c.scope === "all_owned" || names.join(",") !== originalList.join(",")) {
+        changes.scope = queues ? { queues: names } : { agents: names };
+      }
+      if (crossOwner.checked !== c.cross_owner) changes.cross_owner = crossOwner.checked;
+    }
+    for (const { key, input, shown, toApi } of numbers) {
+      if (input.value !== shown) changes[key] = toApi(input.value);
+    }
+    if (Object.keys(changes).length === 0) {
+      status.textContent = "No changes to save.";
+      return;
+    }
+    try {
+      await api("PATCH", `/rules/${encodeURIComponent(rule.rule_id)}`, changes);
+      showMessage(`${rule.rule_id} saved as version ${rule.version + 1}.`, "ok");
+      await refresh();
+    } catch (err) { error.textContent = err.message; }
+  }},
+    field("Recipient", recipient), field("Scope", scopeMode), listedFields, thresholds,
+    el("div", { class: "wide form-actions" }, el("button", { type: "submit", class: "primary" }, "Save"), status));
+  return form;
+}
+
+function renderRules(rules) {
+  const byLead = new Map(LEADS.map(l => [l, []]));
+  for (const r of rules) {
+    if (!byLead.has(r.config.recipient)) byLead.set(r.config.recipient, []);
+    byLead.get(r.config.recipient).push(r);
+  }
+  document.getElementById("rules").replaceChildren(...[...byLead].map(([lead, list]) => {
+    list.sort((a, b) => TEMPLATE_ORDER.indexOf(a.template) - TEMPLATE_ORDER.indexOf(b.template)
+                        || a.rule_id.localeCompare(b.rule_id));
+    return el("div", {}, el("h2", {}, `Notifies ${lead}`),
+      el("div", { class: "cards" }, list.length ? list.map(ruleCard) : el("div", { class: "empty" }, "No rules.")));
+  }));
+}
+
+// -------------------------------------------------------------------- tables
+
+function severity(value) {
+  return value ? el("span", { class: "sev-" + value }, value) : el("span", { class: "muted" }, "—");
+}
+
+function renderIncidents(incidents) {
+  const counts = { all: incidents.length, active: 0, resolved: 0, disabled: 0 };
+  for (const i of incidents) counts[i.status] += 1;
+  document.getElementById("incident-filters").replaceChildren(...["all", "active", "resolved", "disabled"].map(f =>
+    el("button", { type: "button", "aria-pressed": String(f === incidentFilter), "data-filter": f,
+                   onclick: () => { incidentFilter = f; renderIncidents(incidents); } },
+       `${f[0].toUpperCase() + f.slice(1)} (${counts[f]})`)));
+  // Active first; otherwise creation order (the server's order; sort is stable).
+  const shown = incidents.filter(i => incidentFilter === "all" || i.status === incidentFilter)
+    .sort((a, b) => (a.status !== "active") - (b.status !== "active"));
+  document.getElementById("incidents").replaceChildren(table(
+    ["Rule", "Subject", "Recipient", "Status", "Severity", "Opened (UTC)", "Closed (UTC)"],
+    shown.map(i => el("tr", { title: i.incident_id },
+      el("td", {}, i.rule_id), el("td", {}, i.subject_id), el("td", {}, i.recipient),
+      el("td", {}, el("span", { class: "badge status-" + i.status }, i.status)),
+      el("td", {}, severity(i.severity)), el("td", {}, hm(i.opened_at)), el("td", {}, hm(i.closed_at)))),
+    incidents.length ? `No ${incidentFilter} incidents.` : "No incidents yet."));
+}
+
+function renderNotifications(rows) {
+  document.getElementById("notifications").replaceChildren(table(
+    ["#", "Line", "Rule (version)", "Subject", "Recipient", "Kind", "Severity", "Effective (UTC)", "Emitted (UTC)"],
+    rows.map(n => {
+      const lag = (Date.parse(n.emitted_at) - Date.parse(n.effective_at)) / 1000;
+      const emitted = lag > 0
+        ? el("td", { class: "late", title: `Reported ${delay(lag)} after it became true` }, hm(n.emitted_at))
+        : el("td", {}, hm(n.emitted_at));
+      return el("tr", { class: highlighted.has(n.seq) ? "new" : "" },
+        el("td", {}, n.seq),
+        el("td", {}, n.line_number ?? "end of input"),
+        el("td", {}, `${n.rule_id} (v${n.rule_version})`),
+        el("td", {}, n.subject_id),
+        el("td", {}, n.recipient),
+        el("td", { class: "kind-" + n.kind }, n.kind),
+        el("td", {}, severity(n.severity)),
+        el("td", {}, hm(n.effective_at)),
+        emitted);
+    }),
+    "No notifications yet. Press Step or Run All."));
+}
+
+function renderDiagnostics(rows) {
+  document.getElementById("diagnostics").replaceChildren(table(
+    ["Line", "Kind", "Subject", "Detail", "Source"],
+    rows.map(d => el("tr", {}, el("td", {}, d.line_number ?? "—"), el("td", {}, d.kind), el("td", {}, d.subject_id),
+                               el("td", { class: "wrap" }, d.detail), el("td", { class: "muted" }, d.source))),
+    "No diagnostics."));
+}
+
+// ------------------------------------------------------------------- actions
+
+async function refresh() {
+  const [status, rules, incidents, notifications, diagnostics] = await Promise.all(
+    ["/replay/status", "/rules", "/incidents", "/notifications", "/diagnostics"].map(p => api("GET", p)));
+  renderStatus(status);
+  renderRules(rules);
+  renderIncidents(incidents);
+  renderNotifications(notifications);
+  renderDiagnostics(diagnostics);
+}
+
+// Disable the controls during a request (no double clicks), then redraw everything from the server.
+async function act(work) {
+  ["step", "run-all", "reset"].forEach(id => document.getElementById(id).disabled = true);
+  try { await work(); } catch (err) { showMessage(err.message, "err"); }
+  await refresh().catch(err => showMessage(err.message, "err"));
+}
+
+function seqRange(rows) {
+  if (rows.length === 0) return "";
+  const first = rows[0].seq, last = rows[rows.length - 1].seq;
+  return first === last ? ` (#${first})` : ` (#${first}–#${last})`;
+}
+
+document.getElementById("step").addEventListener("click", () => act(async () => {
+  const r = await api("POST", "/replay/step");
+  highlighted = new Set(r.notifications.map(n => n.seq));
+  const what = r.kind === "finish" ? "End of input: the replay is finished" : `Line ${r.line_number}: ${r.outcome}`;
+  showMessage(`${what}; ${plural(r.notifications.length, "new notification")}${seqRange(r.notifications)}.`, "ok");
+}));
+
+document.getElementById("run-all").addEventListener("click", () => act(async () => {
+  const before = lastStatus;
+  const r = await api("POST", "/replay/run-all");
+  highlighted = new Set();  // a whole run would highlight everything; the summary says what was added
+  const lines = r.status.cursor - (before ? before.cursor : 0);
+  const from = before && before.next === "event" ? ` from line ${before.next_line}` : "";
+  showMessage(`Finished: ${plural(lines, "line")}${from} · `
+    + `${plural(r.notifications.length, "new notification")}${seqRange(r.notifications)}.`, "ok");
+}));
+
+document.getElementById("reset").addEventListener("click", () => act(async () => {
+  const r = await api("POST", "/replay/reset");
+  highlighted = new Set();
+  showMessage(r.message, "ok");
+}));
+
+refresh().catch(err => showMessage(err.message, "err"));
+</script>
+</body>
+</html>

@@ -81,6 +81,7 @@ class JournalRow:
     outcome: str | None
     rule_id: str | None
     rule_version: int | None
+    payload: str | None = None  # the event JSON, or the rule config JSON for a rule_change
 
 
 @dataclass(frozen=True)
@@ -158,7 +159,7 @@ class Store:
 
     def journal(self) -> list[JournalRow]:
         rows = self._conn.execute(
-            "SELECT seq, kind, line_number, event_id, outcome, rule_id, rule_version FROM journal ORDER BY seq"
+            "SELECT seq, kind, line_number, event_id, outcome, rule_id, rule_version, payload FROM journal ORDER BY seq"
         ).fetchall()
         return [JournalRow(*row) for row in rows]
 
