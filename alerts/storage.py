@@ -1,4 +1,4 @@
-"""SQLite persistence: an append-only journal of inputs plus stored outputs.
+"""SQLite persistence: a journal of inputs (append-only within the current replay) plus stored outputs.
 
 The engine is deterministic, so its whole state follows from its inputs
 (Decision 49). The database keeps:

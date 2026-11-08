@@ -139,7 +139,7 @@ def _sla(rule: SlaRule, queue: QueueSnapshot) -> Decision:
         return Decision("warning")
     if ratio <= rule.resolve_ratio:
         return Decision("clear")
-    return Decision("hold")  # between resolve and warning: keep whatever is current
+    return Decision("hold")  # between resolve and warning: keep the incident open; a critical drops silently to warning
 
 
 def _duration(start: datetime | None, min_duration_sec: int, clock: datetime) -> Decision:

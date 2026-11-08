@@ -60,19 +60,19 @@ Billing SLA recovery at 10:15, new warning at 10:16 and recovery at 10:30 are di
 
 # 6. Event engine, clock and timers
 
-- Process source records in original file order; maintain simulated clock C=max(C,event.ts). Do not rewind when a late event arrives.
+- Process source records in original file order; maintain simulated clock C=max(C,event.ts). Do not rewind when a late event arrives. A late-but-fresh event (ts < C, but with an event ID not seen before and not stale for its subject and event family) is accepted: durations are measured from event timestamps, and "now" is always C.
 
 - Validate event shapes, including optional/null queue IDs and forecast. Deduplicate on event_id before state mutation; record duplicates, and optionally a simple differing-payload diagnostic without a separate conflict subsystem.
 
 - Track latest accepted timestamp per subject and event family. Stale observations do not overwrite state or create alerts.
 
-- Use a deadline min-heap keyed by (deadline, sequence, rule, subject, episode_version). Exits, disable and edits invalidate old timer versions.
+- Use a deadline min-heap of (deadline, sequence, (rule_id, subject_id)) entries, plus a map from each key to its live (deadline, sequence). Exits, disable, scope changes and edits cancel or replace a key's timer. Obsolete heap entries are skipped when popped (lazy deletion), so no episode version is needed.
 
-- Timer firing order: a live timer with deadline D fires only when the next accepted event has ts > D. It fires before that event is applied, in heap order. It can also fire at end of input if D ≤ horizon. So every accepted event with ts = D is applied first. That includes a state-ending event, wherever it sits among same-timestamp events in file order, so the ending event invalidates its timer before the timer can fire. Duplicate, stale and invalid events never advance the clock or trigger timer firing. Test this explicitly.
+- Timer firing order: a live timer with deadline D fires only when the next accepted event has ts > D. It fires before that event is applied, in heap order. It can also fire at end of input if D ≤ horizon. So every accepted event with ts = D is applied first. That includes a state-ending event, wherever it sits among same-timestamp events in file order, so the ending event invalidates its timer before the timer can fire. Duplicate, stale and invalid events never advance the clock or trigger timer firing. Test this explicitly. Exception for late-but-fresh events: a timer that such an event creates with D < C fires right after that event is applied, at the same step (effective_at = D, emitted_at = C). A timer with D = C still waits for a later event or end of input.
 
-- Track effective_at separately from emitted_at. Immediate rules: both equal the triggering event's ts. Timer rules: effective_at = deadline D. emitted_at = the simulated clock at the firing step, which is the ts of the first accepted event with ts > D, or the horizon at end of input. So emitted_at is never earlier than the evidence that made the alert certain. Never claim a notification was delivered in the past.
+- Track effective_at separately from emitted_at. Immediate rules: effective_at = the triggering event's ts, and emitted_at = the simulated clock after that event is applied. They are equal except for late-but-fresh events, where emitted_at = C. A resolution's effective_at is the resolving event's ts, even when late evidence places it before the alert's effective_at. History is never rewritten, and an alert_contradicted_by_late_evidence diagnostic is recorded. Timer rules: effective_at = deadline D. emitted_at = the simulated clock at the firing step, which is the ts of the first accepted event with ts > D, or the horizon at end of input. So emitted_at is never earlier than the evidence that made the alert certain. Never claim a notification was delivered in the past.
 
-- The observation horizon is the simulated clock at end of input (10:30 for this dataset), and it is inclusive. At end of input, fire live timers with deadline ≤ horizon. Never fire a timer with deadline > horizon. Run All followed by Reset and Run All must reproduce the same ordered results.
+- The observation horizon is the simulated clock at end of input (10:30 for this dataset), and it is inclusive. At end of input, fire live timers with deadline ≤ horizon. Never fire a timer with deadline > horizon. Run All followed by Reset and Run All must reproduce the same ordered results. End of input finalizes the replay: further steps are rejected until Reset. After that, no new incidents, timers or notifications may be created: rule edits may only silently close or re-route existing incidents, and may only move or cancel existing pending timers (Decision 68).
 
 ## Pure evaluation boundary
 
@@ -141,11 +141,22 @@ Python 3.12+, FastAPI, Pydantic, SQLite, pytest, stdlib heapq; a single static/s
 | ingest.py / models.py     | Typed parsing and structural validation.                                      |
 | state.py                  | Event-ID dedupe, freshness, replay clock, latest accepted operational state.  |
 | rules.py                  | Pure threshold/severity evaluation.                                           |
-| incidents.py / routing.py | Lifecycle transitions, seeded ownership, visible notification decisions.      |
-| storage.py                | SQLite transaction around processed marker, state, incident and notification. |
+| incidents.py              | Pure incident lifecycle transitions and notification records.                 |
+| timers.py                 | Virtual duration timers: deadline min-heap with lazy deletion.                |
+| routing.py                | Seeded ownership, scope resolution, routing validation and the seeded rules.  |
+| engine.py                 | Orchestrator: acceptance check, timer firing, rule evaluation, incident transitions, rule management, finish and reset. |
+| storage.py                | SQLite journal of every input, stored outputs, one transaction per operation, and recovery by replay with a self-check. |
 | api.py + static UI        | Rules, replay controls, incident list, notification history, diagnostics.     |
 
-SQLite tables: rules, operational_state, incidents, notifications, processed_events; ownership can be a JSON seed. Store active incident uniqueness on (rule_id, subject_id), and preserve immutable notification history. Local replay is serialized; do not imply concurrent workers are supported.
+SQLite tables:
+
+- baseline_rules: rule configs and versions at the start of the current replay. Reset makes the current rules the new baseline.
+
+- journal: every input in order. That covers events with their accepted, duplicate or stale outcome; rule changes with their full config and resulting version; and the first finish.
+
+- incidents and notifications.
+
+Operational state and processed event IDs are not stored separately. They are rebuilt by replaying the journal from the baseline, and recovery checks the rebuilt incidents and notifications against the stored ones. Each operation is one transaction. Expected pre-mutation errors (rule validation, stepping after `finish()`) are re-raised without recovery; a potentially mutating engine error or a failed database write rolls back and the engine is rebuilt from the journal. The journal is append-only within the current replay: `reset()` clears it and the outputs and stores the current rules as a new baseline. Ownership is a seeded map in code. The engine enforces one active incident per (rule_id, subject_id), and recovery verifies it. Notification history is append-only within a replay. Local replay is serialized through one connection; do not imply concurrent workers are supported.
 
 Endpoints: GET/POST /rules, PATCH /rules/{id}, GET /incidents, GET /notifications, POST /replay/step, /replay/run-all, /replay/reset, GET /replay/status. UI shows simulated clock, file position, counts, rule previews, active incidents and notifications.
 
