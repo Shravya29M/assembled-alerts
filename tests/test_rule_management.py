@@ -318,7 +318,7 @@ def test_edit_after_finish_creates_no_timers_incidents_or_notifications() -> Non
     after = engine_snapshot(driver.engine)
     assert after["rules"][LONG_A11].min_duration_sec == 1800
     assert after["versions"][LONG_A11] == 2
-    assert after["timers"] == {}  # due 09:40 <= horizon: cancelled, never fired (Decision 68)
+    assert after["timers"] == []  # due 09:40 <= horizon: cancelled, never fired (Decision 68)
     unchanged = ("rules", "versions", "timers")
     assert {k: v for k, v in after.items() if k not in unchanged} == {
         k: v for k, v in before.items() if k not in unchanged

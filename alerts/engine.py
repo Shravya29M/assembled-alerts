@@ -49,7 +49,8 @@ def _validated(rule: Rule) -> Rule:
 
 
 class Engine:
-    def __init__(self, rules: list[Rule]) -> None:
+    def __init__(self, rules: list[Rule], *, versions: dict[str, int] | None = None) -> None:
+        """`versions` restores rule versions (e.g. a stored baseline after reset); default 1 each."""
         rules = [_validated(rule) for rule in rules]  # validate everything before any state exists
         seen: set[str] = set()
         for rule in rules:
@@ -58,7 +59,9 @@ class Engine:
             seen.add(rule.rule_id)
             validate_routing(rule)  # RoutingError
         self.rules: dict[str, Rule] = {rule.rule_id: rule for rule in rules}
-        self._versions: dict[str, int] = {rule.rule_id: 1 for rule in rules}
+        self._versions: dict[str, int] = {rule.rule_id: 1 for rule in rules} if versions is None else dict(versions)
+        if set(self._versions) != set(self.rules) or min(self._versions.values(), default=1) < 1:
+            raise ValueError("versions must give every rule exactly one version >= 1")
         self.reset()
 
     def reset(self) -> None:
@@ -129,9 +132,7 @@ class Engine:
         timers are only moved or cancelled, never added (Decision 68).
         Queue rules simply use the new config at their next snapshot.
         """
-        rule = _validated(rule)  # all checks run before any state changes
-        self._rule(rule.rule_id)  # must already exist
-        validate_routing(rule)  # RoutingError leaves the old rule in place
+        rule = self.validate_rule(rule)  # all checks run before any state changes
         self.rules[rule.rule_id] = rule
         self._versions[rule.rule_id] += 1
         self._reconcile(rule)
@@ -142,7 +143,22 @@ class Engine:
                 self._recompute_timers(rule)
         return []
 
+    def validate_rule(self, rule: Rule) -> Rule:
+        """Every check update_rule makes, with no side effects. Returns the validated rule.
+
+        Raises ValidationError (config), ValueError (unknown rule_id) or RoutingError.
+        """
+        rule = _validated(rule)
+        self._rule(rule.rule_id)  # must already exist
+        validate_routing(rule)
+        return rule
+
     # -- views --------------------------------------------------------------
+
+    @property
+    def finished(self) -> bool:
+        """True after finish(), until reset()."""
+        return self._finished
 
     def rule_version(self, rule_id: str) -> int:
         return self._versions[rule_id]

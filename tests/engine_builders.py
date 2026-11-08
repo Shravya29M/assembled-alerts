@@ -64,7 +64,8 @@ def engine_snapshot(engine: Engine) -> dict[str, Any]:
         "notifications": list(engine.notifications),
         "incidents": dict(engine.incidents),
         "clock": engine.state.clock,
-        "timers": engine.pending_timers(),
+        "timers": list(engine.pending_timers().items()),  # ordered: creation order matters for ties
+        "finished": engine.finished,
         "state_diagnostics": list(engine.state.diagnostics),
         "engine_diagnostics": list(engine.diagnostics),
         "rules": dict(engine.rules),
