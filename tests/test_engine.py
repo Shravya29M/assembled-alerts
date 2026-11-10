@@ -7,6 +7,7 @@ lead_support; a_07, a_19 and billing belong to lead_billing.
 import pytest
 
 from alerts.engine import Engine, ReplayFinishedError
+from alerts.incidents import Notification
 from alerts.ingest import SourcedEvent
 from alerts.routing import seeded_rules
 from tests.builders import adherence, at, snapshot, state_change
@@ -318,3 +319,113 @@ def test_reset_allows_replay_again_with_current_rules() -> None:
 def test_duplicate_rule_ids_rejected() -> None:
     with pytest.raises(ValueError, match="duplicate rule_id"):
         Engine([*seeded_rules(), seeded(LONG_A11)])
+
+
+# ---------------------------------------------------------------------------
+# Escalation noise: at most one critical notification per incident and recipient
+# ---------------------------------------------------------------------------
+
+BACKLOG = "backlog.lead_billing"
+SLA = "sla.lead_billing"
+
+
+def billing(ts: str, *, tickets: int = 0, wait: int = 0) -> object:
+    """A billing snapshot: `tickets` drives the backlog rule, `wait` (SLA target 120 s) the SLA rule."""
+    return snapshot(ts, "billing", tickets_waiting=tickets, longest_wait_sec=wait)
+
+
+def feed(
+    driver: Driver, rule_id: str, values: list[tuple[str, dict[str, int]]]
+) -> tuple[list[Notification], list[str | None]]:
+    """Send billing snapshots; return everything emitted and incident #1's severity after each one."""
+    emitted: list[Notification] = []
+    severities: list[str | None] = []
+    for ts, fields in values:
+        emitted += driver.send(billing(ts, **fields))
+        severities.append(driver.engine.incidents[f"{rule_id}:billing:1"].severity)
+    return emitted, severities
+
+
+def test_backlog_re_escalation_within_one_incident_is_silent() -> None:
+    values = [("09:00", 16), ("09:01", 21), ("09:02", 18), ("09:03", 21), ("09:04", 18), ("09:05", 21)]
+    emitted, severities = feed(Driver(), BACKLOG, [(ts, {"tickets": n}) for ts, n in values])
+    assert brief(emitted) == [
+        (BACKLOG, "billing", "opened", "warning", "09:00", "09:00"),
+        (BACKLOG, "billing", "escalated", "critical", "09:01", "09:01"),
+    ]
+    assert severities == ["warning", "critical", "warning", "critical", "warning", "critical"]
+
+
+def test_sla_re_escalation_within_one_incident_is_silent() -> None:
+    values = [("09:00", 100), ("09:01", 121), ("09:02", 100), ("09:03", 121)]  # 83%, 101%, 83%, 101%
+    emitted, severities = feed(Driver(), SLA, [(ts, {"wait": w}) for ts, w in values])
+    assert brief(emitted) == [
+        (SLA, "billing", "opened", "warning", "09:00", "09:00"),
+        (SLA, "billing", "escalated", "critical", "09:01", "09:01"),
+    ]
+    assert severities == ["warning", "critical", "warning", "critical"]
+
+
+def test_opening_as_critical_counts_as_the_critical_notification() -> None:
+    values = [("09:00", 121), ("09:01", 92), ("09:02", 121)]  # 101%, hold band (77%), 101%
+    emitted, severities = feed(Driver(), SLA, [(ts, {"wait": w}) for ts, w in values])
+    assert brief(emitted) == [(SLA, "billing", "opened", "critical", "09:00", "09:00")]
+    assert severities == ["critical", "warning", "critical"]
+
+
+def test_a_new_incident_can_escalate_again() -> None:
+    driver = Driver()
+    values = [("09:00", 16), ("09:01", 21), ("09:02", 14), ("09:03", 16), ("09:04", 21)]
+    emitted = driver.send(*(billing(ts, tickets=n) for ts, n in values))
+    assert [(n.kind, n.severity, n.incident_id) for n in emitted] == [
+        ("opened", "warning", f"{BACKLOG}:billing:1"),
+        ("escalated", "critical", f"{BACKLOG}:billing:1"),
+        ("resolved", "critical", f"{BACKLOG}:billing:1"),
+        ("opened", "warning", f"{BACKLOG}:billing:2"),
+        ("escalated", "critical", f"{BACKLOG}:billing:2"),
+    ]
+
+
+def test_reset_forgets_escalations_even_though_incident_ids_restart() -> None:
+    driver = Driver()
+    driver.send(billing("09:00", tickets=16), billing("09:01", tickets=21))
+    driver.engine.reset()
+    emitted = driver.send(billing("09:00", tickets=16), billing("09:01", tickets=21))
+    assert [(n.kind, n.incident_id) for n in emitted] == [
+        ("opened", f"{BACKLOG}:billing:1"),
+        ("escalated", f"{BACKLOG}:billing:1"),
+    ]
+
+
+def test_re_enabled_rule_opens_a_new_incident_that_can_escalate() -> None:
+    driver = Driver()
+    driver.send(billing("09:00", tickets=16), billing("09:01", tickets=21))
+    assert driver.engine.disable_rule(BACKLOG) == []
+    assert driver.engine.enable_rule(BACKLOG) == []
+    emitted = driver.send(billing("09:02", tickets=16), billing("09:03", tickets=21))
+    assert [(n.kind, n.incident_id) for n in emitted] == [
+        ("opened", f"{BACKLOG}:billing:2"),
+        ("escalated", f"{BACKLOG}:billing:2"),
+    ]
+    assert driver.engine.incidents[f"{BACKLOG}:billing:1"].status == "disabled"
+
+
+def test_escalation_memory_is_per_recipient_and_reassignment_never_alerts() -> None:
+    driver = Driver()
+    driver.send(billing("09:00", tickets=16), billing("09:01", tickets=21))  # lead_billing: opened, escalated
+    count = len(driver.engine.notifications)
+
+    # lead_support does not own billing, so reassigning needs an explicit cross-owner scope.
+    to_support = edited(BACKLOG, recipient="lead_support", scope={"queues": ["billing"]}, cross_owner=True)
+    assert driver.engine.update_rule(to_support) == []  # reassignment alone never notifies
+    assert driver.send(billing("09:02", tickets=22)) == []  # still critical: nothing new to report
+    assert len(driver.engine.notifications) == count
+
+    emitted = driver.send(billing("09:03", tickets=18), billing("09:04", tickets=21))
+    assert [(n.recipient, n.kind, n.severity, n.incident_id) for n in emitted] == [
+        ("lead_support", "escalated", "critical", f"{BACKLOG}:billing:1"),  # lead_support's first critical
+    ]
+
+    assert driver.engine.update_rule(seeded(BACKLOG)) == []  # back to lead_billing, same incident
+    assert driver.send(billing("09:05", tickets=18), billing("09:06", tickets=21)) == []  # already told
+    assert driver.engine.incidents[f"{BACKLOG}:billing:1"].severity == "critical"

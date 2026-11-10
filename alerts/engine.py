@@ -76,6 +76,9 @@ class Engine:
         self._active: dict[tuple[str, str], str] = {}
         self._counts: dict[tuple[str, str], int] = {}  # (rule_id, subject_id) -> incidents so far
         self._unowned: set[str] = set()  # subjects already diagnosed as unowned
+        # (incident_id, recipient) pairs that were sent a critical notification (Decision 106).
+        # Rebuilt by journal replay on restart and after a failed write; cleared here on reset.
+        self._critical_sent: set[tuple[str, str]] = set()
         self._finished = False  # set by finish(); step() is rejected until reset()
 
     # -- replay -------------------------------------------------------------
@@ -316,7 +319,9 @@ class Engine:
         key = IncidentKey(rule.rule_id, subject_id, rule.recipient)
         new_id = f"{rule.rule_id}:{subject_id}:{self._counts.get(pair, 0) + 1}"
 
-        incident, change = transition(current, decision, key=key, at=effective_at, new_incident_id=new_id)
+        critical_notified = current is not None and (current.incident_id, current.recipient) in self._critical_sent
+        incident, change = transition(current, decision, key=key, at=effective_at, new_incident_id=new_id,
+                                      critical_notified=critical_notified)  # fmt: skip
         if incident is None:
             return
         self.incidents[incident.incident_id] = incident
@@ -338,6 +343,8 @@ class Engine:
         self._notify(rule, incident, change, emitted_at, line)
 
     def _notify(self, rule: Rule, incident: Incident, change: Change, emitted_at: datetime, line: int | None) -> None:
+        if change.kind in ("opened", "escalated") and change.severity == "critical":
+            self._critical_sent.add((incident.incident_id, incident.recipient))
         self.notifications.append(Notification(
             seq=len(self.notifications) + 1,
             incident_id=incident.incident_id,

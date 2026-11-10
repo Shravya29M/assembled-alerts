@@ -5,9 +5,11 @@ changes given a rule Decision. It reads no clock and keeps no counters:
 the engine supplies the time (`at`) and the ID for a new incident, so the
 same inputs always give the same outputs.
 
-Noise policy (PLAN §5): notify on opening, warning -> critical escalation
-and resolution. Same-severity repeats and critical -> warning downgrades
-are silent.
+Noise policy (PLAN §5, refined by Decision 106): notify on opening,
+warning -> critical escalation and resolution. Same-severity repeats and
+critical -> warning downgrades are silent, and each recipient gets at most one
+critical notification per incident: a later re-escalation updates the severity
+silently. The engine remembers who was told; this function only receives a flag.
 """
 
 from dataclasses import dataclass, replace
@@ -71,8 +73,13 @@ def transition(
     key: IncidentKey,
     at: datetime,
     new_incident_id: str,
+    critical_notified: bool = False,
 ) -> tuple[Incident | None, Change | None]:
-    """Next incident and the notifiable change, if any. `current` is the ACTIVE incident or None."""
+    """Next incident and the notifiable change, if any. `current` is the ACTIVE incident or None.
+
+    `critical_notified`: the current incident's recipient has already received a
+    critical notification for it, so a warning -> critical escalation is silent.
+    """
     condition = decision.condition
 
     if current is None:
@@ -95,7 +102,8 @@ def transition(
         resolved = replace(current, status="resolved", closed_at=at)
         return resolved, Change("resolved", current.severity, at)  # keeps its last severity
     if condition == "critical" and current.severity == "warning":
-        return replace(current, severity="critical"), Change("escalated", "critical", at)
+        escalated = replace(current, severity="critical")  # the severity is always updated
+        return escalated, None if critical_notified else Change("escalated", "critical", at)
     if condition in ("warning", "hold") and current.severity == "critical":
         return replace(current, severity="warning"), None  # silent downgrade
     return current, None  # unchanged severity; pending/met while active is ignored

@@ -70,6 +70,15 @@ def test_warning_to_critical_escalates() -> None:
     assert change == Change(kind="escalated", severity="critical", effective_at=NOW)
 
 
+def test_escalation_is_silent_when_recipient_already_received_critical() -> None:
+    # At most one critical notification per incident and recipient; the severity stays accurate.
+    incident, change = transition(
+        active("warning"), Decision("critical"), key=KEY, at=NOW, new_incident_id="NEW:1", critical_notified=True
+    )
+    assert incident == active("critical")
+    assert change is None
+
+
 @pytest.mark.parametrize(
     ("severity", "condition", "expected_severity"),
     [

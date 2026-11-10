@@ -61,7 +61,7 @@ Start with a fresh database. Every expected value below was checked against a cl
 
 - **Four rule templates**: backlog, SLA risk/breach, adherence duration, long-call duration. Each has a plain-English preview, editable thresholds, scope, recipient and an enable toggle.
 - **Rule creation**: "New rule from this one" creates a new rule from any template. It starts at v1 and **enabled**, applies only from now on, and survives restart and Reset.
-- **Incidents and noise control**: one active incident per rule and subject; notifications only on open, escalation and resolution.
+- **Incidents and noise control**: one active incident per rule and subject; notifications only on open, escalation and resolution, and at most one critical notification per incident for each recipient.
 - **Routing**: seeded, illustrative ownership. A rule may only cover subjects its recipient owns, unless `cross_owner` is set.
 - **Data quality**, handled differently by kind:
   - Lines that fail schema validation are skipped, with the reason in the server log.
@@ -114,6 +114,7 @@ Seeded rules (two leads × four templates, all scoped to the subjects each lead 
 - **Creating** assigns `{template}.{lead}.{n}`; the new rule never alerts on evidence seen before it existed. Created after the replay finishes, it schedules nothing until Reset ([100–104](docs/DECISIONS.md)).
 - **Overlapping rules are independent**: if two rules cover the same queue or agent, the lead can get one notification from each. The page says so next to "New rule from this one".
 - **Reset** clears replay history but keeps every rule, including created ones, at its current version ([55](docs/DECISIONS.md)).
+- **Escalations**: a recipient gets at most one critical notification per incident. If backlog goes 16 → 21 → 18 → 21, the lead gets "opened" and "escalated" once; the incident still shows its current severity (critical → warning → critical). Opening directly as critical counts. Reassigning a rule's recipient never sends an alert by itself; the new recipient gets the next escalation and the resolution ([60](docs/DECISIONS.md), [106–107](docs/DECISIONS.md)).
 - **Agent states**: any non-blank state is accepted exactly as sent, but only `on_call` counts as a call. Unfamiliar values (for example `offline_v2` or `ON_CALL`) add an `unknown_agent_state` diagnostic ([99](docs/DECISIONS.md)).
 - **Events**: duplicates (same `event_id`) and stale events (older than the latest event of the same type for that subject) change nothing; late but fresh events are accepted without moving the clock backwards ([21–23](docs/DECISIONS.md)).
 
@@ -125,7 +126,7 @@ The expected 20 notifications (the **oracle**) were established and committed be
 
 ## Testing and verification
 
-- **438 automated tests** (`pytest`): parsing, replay state, rules, timers, incidents, routing, rule editing and creation, SQLite recovery and rollback, the HTTP API, dataset facts and the oracle.
+- **449 automated tests** (`pytest`): parsing, replay state, rules, timers, incidents, routing, rule editing and creation, SQLite recovery and rollback, the HTTP API, dataset facts and the oracle.
 - **Clean checkouts**: before each packaging and feature commit in the final phase, the staged files were copied to an empty folder, installed from `uv.lock` on Python 3.12, and the full suite was run there.
 - **Browser checks**: Playwright scripts exercised the dashboard (walkthrough, rule creation and numeric ordering, several widths, light and dark mode). They were run as scratch scripts and **are not included in this repository**.
 - Requirements were traced against my implementation plan ([`docs/PLAN.md`](docs/PLAN.md)) and against the original assignment ([below](#assignment-coverage)).
@@ -137,6 +138,8 @@ The expected 20 notifications (the **oracle**) were established and committed be
 - An unfamiliar agent state, even a typo like `ON_CALL`, ends a call, so a long-call alert can be missed or resolved early. A per-customer state mapping is the production fix ([99](docs/DECISIONS.md)).
 - Overlapping rules can produce duplicate notifications for the same subject.
 - A duration alert can open and resolve in the same step, when the agent's exit is the first event after the deadline ([105](docs/DECISIONS.md)).
+- A second critical spike within one incident is not re-sent; the incident stays active and critical on the dashboard. A reminder interval is the production fix ([106](docs/DECISIONS.md)).
+- **Older local databases**: an `alerts.db` written before the escalation change that contains a repeated escalation no longer passes the recovery check, and the server stops at startup with `RecoveryMismatchError` ([107](docs/DECISIONS.md)). It is never deleted or changed automatically. Runs of the seeded rules on the sample data are not affected. To keep a backup and start fresh, stop the server and move the file aside (`mv alerts.db alerts.db.bak`), or start with `ALERTS_DB` pointing to a new file.
 - Rules cannot be deleted or renamed, and IDs keep the original lead's name if the recipient changes; disable a rule instead.
 - `GET /rules` uses text order; only the page sorts numerically.
 - The pip path resolves versions within the ranges in `pyproject.toml`; only uv uses `uv.lock`.
@@ -165,7 +168,7 @@ The expected 20 notifications (the **oracle**) were established and committed be
 | Disclose AI use and how output was verified | Below | [AI-assisted development](#ai-assisted-development) |
 | A working repository | This repository or a ZIP | [Quick start](#quick-start) |
 
-PLAN.md is kept as the original plan. Since then, rule creation was added (Decisions 100–105 replace 80), agent states became flexible (99 revises 10), and storage uses a journal with four tables (70).
+PLAN.md is kept as the original plan. Since then, rule creation was added (Decisions 100–105 replace 80), agent states became flexible (99 revises 10), storage uses a journal with four tables (70), and a recipient gets at most one critical notification per incident (106–107, refining PLAN §5).
 
 ## AI-assisted development
 
@@ -184,7 +187,7 @@ The working rules for the AI-assisted, phase-by-phase workflow are in [`CLAUDE.m
 ```
 alerts/            application code (see How it works)
 alerts/static/     the dashboard page
-tests/             438 tests, including the oracle
+tests/             449 tests, including the oracle
 data/events.jsonl  the sample event stream (96 lines)
 docs/              PLAN.md (original plan), DECISIONS.md, ENGINEERING_LOG.md, screenshot.png
 ```

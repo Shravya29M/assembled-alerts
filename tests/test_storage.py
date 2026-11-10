@@ -14,11 +14,12 @@ from typing import Any
 import pytest
 
 from alerts.engine import Engine, ReplayFinishedError
+from alerts.incidents import Notification
 from alerts.ingest import SourcedEvent, load_events
 from alerts.routing import RoutingError, seeded_rules
 from alerts.rules import Rule
 from alerts.storage import RecoveryMismatchError, StorageError, Store
-from tests.builders import at
+from tests.builders import at, snapshot
 from tests.engine_builders import edited, engine_snapshot
 from tests.test_dataset_oracle import ORACLE
 from tests.test_rule_creation import (
@@ -575,3 +576,66 @@ def test_seeded_store_without_additions_is_unchanged(tmp_path: Path) -> None:
     perform(store, plain_run())
     assert {row.kind for row in store.journal()} == {"event", "finish"}
     assert oracle_shape(store.stored_notifications()) == ORACLE
+
+
+# ---------------------------------------------------------------------------
+# Escalation memory: rebuilt by journal replay after restart, rollback and Reset
+# ---------------------------------------------------------------------------
+
+
+def billing_backlog(line: int, ts: str, tickets: int) -> SourcedEvent:
+    return SourcedEvent(line, snapshot(ts, "billing", tickets_waiting=tickets))
+
+
+def kinds(notifications: list[Notification]) -> list[str]:
+    return [n.kind for n in notifications]
+
+
+def test_escalation_memory_survives_restart(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.db"
+    store = Store.create(path, seeded_rules())
+    for line, (ts, tickets) in enumerate([("09:00", 16), ("09:01", 21), ("09:02", 18), ("09:03", 21)], start=1):
+        store.step(billing_backlog(line, ts, tickets))
+    store.close()
+
+    store = Store.open(path)  # replays the journal and checks it against the stored outputs
+    assert kinds(store.stored_notifications()) == ["opened", "escalated"]
+    store.step(billing_backlog(5, "09:04", 18))
+    assert store.step(billing_backlog(6, "09:05", 21)).notifications == []
+    assert store.engine.incidents["backlog.lead_billing:billing:1"].severity == "critical"
+
+
+def test_rollback_rebuilds_escalation_memory_from_the_journal(tmp_path: Path) -> None:
+    connections: list[FailingConnection] = []
+    store = Store.create(tmp_path / "alerts.db", seeded_rules(), connect=failing_connect(connections))
+    store.step(billing_backlog(1, "09:00", 16))
+
+    # The injected failure hits the notifications insert, which runs on every step, even an empty one.
+    escalate = billing_backlog(2, "09:01", 21)
+    connections[-1].armed = True
+    with pytest.raises(StorageError):
+        store.step(escalate)
+    connections[-1].armed = False
+    assert kinds(store.step(escalate).notifications) == ["escalated"]  # the failed step left no memory behind
+
+    store.step(billing_backlog(3, "09:02", 18))
+    re_escalate = billing_backlog(4, "09:03", 21)
+    connections[-1].armed = True
+    with pytest.raises(StorageError):
+        store.step(re_escalate)
+    connections[-1].armed = False
+    assert store.step(re_escalate).notifications == []  # the rebuild restored the memory
+    assert kinds(store.stored_notifications()) == ["opened", "escalated"]
+
+
+def test_reset_clears_escalation_memory_and_survives_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.db"
+    store = Store.create(path, seeded_rules())
+    store.step(billing_backlog(1, "09:00", 16))
+    store.step(billing_backlog(2, "09:01", 21))
+    store.reset()
+
+    store.step(billing_backlog(1, "09:00", 16))
+    assert kinds(store.step(billing_backlog(2, "09:01", 21)).notifications) == ["escalated"]
+    store.close()
+    assert kinds(Store.open(path).stored_notifications()) == ["opened", "escalated"]
