@@ -66,11 +66,15 @@ class BacklogRule(_RuleBase):
     scope: AllOwned | QueueScope
     warning_above: NonNegativeInt = 15
     critical_above: NonNegativeInt = 20
+    # Optional hysteresis (Decision 108). None: resolve as soon as tickets_waiting <= warning_above.
+    resolve_at_or_below: NonNegativeInt | None = None
 
     @model_validator(mode="after")
     def _warning_below_critical(self) -> Self:
         if self.warning_above >= self.critical_above:
             raise ValueError("warning_above must be less than critical_above")
+        if self.resolve_at_or_below is not None and self.resolve_at_or_below > self.warning_above:
+            raise ValueError("resolve_at_or_below must be at most warning_above")
         return self
 
 
@@ -126,7 +130,10 @@ def _backlog(rule: BacklogRule, queue: QueueSnapshot) -> Decision:
         return Decision("critical")
     if waiting > rule.warning_above:
         return Decision("warning")
-    return Decision("clear")
+    resolve_at = rule.warning_above if rule.resolve_at_or_below is None else rule.resolve_at_or_below
+    if waiting <= resolve_at:
+        return Decision("clear")
+    return Decision("hold")  # between resolve_at_or_below and warning: keep an open incident open
 
 
 def _sla(rule: SlaRule, queue: QueueSnapshot) -> Decision:

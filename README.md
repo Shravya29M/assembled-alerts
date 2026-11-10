@@ -104,7 +104,7 @@ Seeded rules (two leads × four templates, all scoped to the subjects each lead 
 
 | Template | Opens / escalates | Clears | Default |
 |---|---|---|---|
-| Backlog | warning `tickets_waiting > 15`, critical `> 20` | `≤ 15` (critical → warning is silent) | 15 / 20 |
+| Backlog | warning `tickets_waiting > 15`, critical `> 20` | `≤ 15`, or `≤ resolve_at_or_below` if set (critical → warning is silent) | 15 / 20 / blank |
 | SLA | warning `longest_wait ≥ 80%` of target, critical `> 100%` | `≤ 75%` | 80% / 100% / 75% |
 | Adherence | out of adherence for `≥ 10 min` | a newer in-adherence check | 600 s |
 | Long call | on one call for `≥ 45 min` | the agent leaves `on_call` | 2700 s |
@@ -114,6 +114,7 @@ Seeded rules (two leads × four templates, all scoped to the subjects each lead 
 - **Creating** assigns `{template}.{lead}.{n}`; the new rule never alerts on evidence seen before it existed. Created after the replay finishes, it schedules nothing until Reset ([100–104](docs/DECISIONS.md)).
 - **Overlapping rules are independent**: if two rules cover the same queue or agent, the lead can get one notification from each. The page says so next to "New rule from this one".
 - **Reset** clears replay history but keeps every rule, including created ones, at its current version ([55](docs/DECISIONS.md)).
+- **Backlog hysteresis is optional**: the seeded backlog rules have none, as in the plan, so a queue alternating 16 / 15 opens and resolves an incident each time. A lead can set **Resolve at or below** on a backlog rule. For example, with warning above 15 and resolve at or below 12, a backlog of 16 opens an incident, 13 to 15 keeps it open without opening a new one, and 12 resolves it; 16, 15, 16, 14 then sends one notification instead of four ([108–109](docs/DECISIONS.md)).
 - **Escalations**: a recipient gets at most one critical notification per incident. If backlog goes 16 → 21 → 18 → 21, the lead gets "opened" and "escalated" once; the incident still shows its current severity (critical → warning → critical). Opening directly as critical counts. Reassigning a rule's recipient never sends an alert by itself; the new recipient gets the next escalation and the resolution ([60](docs/DECISIONS.md), [106–107](docs/DECISIONS.md)).
 - **Agent states**: any non-blank state is accepted exactly as sent, but only `on_call` counts as a call. Unfamiliar values (for example `offline_v2` or `ON_CALL`) add an `unknown_agent_state` diagnostic ([99](docs/DECISIONS.md)).
 - **Events**: duplicates (same `event_id`) and stale events (older than the latest event of the same type for that subject) change nothing; late but fresh events are accepted without moving the clock backwards ([21–23](docs/DECISIONS.md)).
@@ -126,7 +127,7 @@ The expected 20 notifications (the **oracle**) were established and committed be
 
 ## Testing and verification
 
-- **449 automated tests** (`pytest`): parsing, replay state, rules, timers, incidents, routing, rule editing and creation, SQLite recovery and rollback, the HTTP API, dataset facts and the oracle.
+- **485 automated tests** (`pytest`): parsing, replay state, rules, timers, incidents, routing, rule editing and creation, SQLite recovery and rollback, the HTTP API, dataset facts and the oracle.
 - **Clean checkouts**: before each packaging and feature commit in the final phase, the staged files were copied to an empty folder, installed from `uv.lock` on Python 3.12, and the full suite was run there.
 - **Browser checks**: Playwright scripts exercised the dashboard (walkthrough, rule creation and numeric ordering, several widths, light and dark mode). They were run as scratch scripts and **are not included in this repository**.
 - Requirements were traced against my implementation plan ([`docs/PLAN.md`](docs/PLAN.md)) and against the original assignment ([below](#assignment-coverage)).
@@ -138,6 +139,7 @@ The expected 20 notifications (the **oracle**) were established and committed be
 - An unfamiliar agent state, even a typo like `ON_CALL`, ends a call, so a long-call alert can be missed or resolved early. A per-customer state mapping is the production fix ([99](docs/DECISIONS.md)).
 - Overlapping rules can produce duplicate notifications for the same subject.
 - A duration alert can open and resolve in the same step, when the agent's exit is the first event after the deadline ([105](docs/DECISIONS.md)).
+- Seeded backlog rules still have no hysteresis, so a backlog hovering around the warning line opens and resolves repeatedly unless a lead sets Resolve at or below ([108](docs/DECISIONS.md)).
 - A second critical spike within one incident is not re-sent; the incident stays active and critical on the dashboard. A reminder interval is the production fix ([106](docs/DECISIONS.md)).
 - **Older local databases**: an `alerts.db` written before the escalation change that contains a repeated escalation no longer passes the recovery check, and the server stops at startup with `RecoveryMismatchError` ([107](docs/DECISIONS.md)). It is never deleted or changed automatically. Runs of the seeded rules on the sample data are not affected. To keep a backup and start fresh, stop the server and move the file aside (`mv alerts.db alerts.db.bak`), or start with `ALERTS_DB` pointing to a new file.
 - Rules cannot be deleted or renamed, and IDs keep the original lead's name if the recipient changes; disable a rule instead.
@@ -168,7 +170,7 @@ The expected 20 notifications (the **oracle**) were established and committed be
 | Disclose AI use and how output was verified | Below | [AI-assisted development](#ai-assisted-development) |
 | A working repository | This repository or a ZIP | [Quick start](#quick-start) |
 
-PLAN.md is kept as the original plan. Since then, rule creation was added (Decisions 100–105 replace 80), agent states became flexible (99 revises 10), storage uses a journal with four tables (70), and a recipient gets at most one critical notification per incident (106–107, refining PLAN §5).
+PLAN.md is kept as the original plan. Since then, rule creation was added (Decisions 100–105 replace 80), agent states became flexible (99 revises 10), storage uses a journal with four tables (70), a recipient gets at most one critical notification per incident (106–107, refining PLAN §5), and backlog rules gained an optional recovery threshold that is off by default (108–109).
 
 ## AI-assisted development
 
@@ -187,7 +189,7 @@ The working rules for the AI-assisted, phase-by-phase workflow are in [`CLAUDE.m
 ```
 alerts/            application code (see How it works)
 alerts/static/     the dashboard page
-tests/             449 tests, including the oracle
+tests/             485 tests, including the oracle
 data/events.jsonl  the sample event stream (96 lines)
 docs/              PLAN.md (original plan), DECISIONS.md, ENGINEERING_LOG.md, screenshot.png
 ```

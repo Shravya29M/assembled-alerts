@@ -37,8 +37,9 @@ def rule_preview(rule: Rule) -> str:
     queues = isinstance(rule, (BacklogRule, SlaRule))
     who = _subjects_phrase(rule, queues)
     if isinstance(rule, BacklogRule):
+        recovery = "" if rule.resolve_at_or_below is None else f"; recovers at or below {rule.resolve_at_or_below}"
         body = (f"{who} has more than {rule.warning_above} tickets waiting; "
-                f"critical above {rule.critical_above}.")  # fmt: skip
+                f"critical above {rule.critical_above}{recovery}.")  # fmt: skip
     elif isinstance(rule, SlaRule):
         body = (f"the longest wait in {who} reaches {_percent(rule.warning_ratio)} of its SLA target; "
                 f"critical above {_percent(rule.critical_ratio)}; "

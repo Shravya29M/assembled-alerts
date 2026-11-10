@@ -634,7 +634,8 @@ def test_create_rule_returns_201_with_generated_id(client: TestClient) -> None:
         "preview": "Notify lead_billing when any listed queue (billing) has more than 20 tickets waiting; "
                    "critical above 25.",
         "config": {"rule_id": "backlog.lead_billing.2", "recipient": "lead_billing", "cross_owner": False,
-                   "enabled": True, "scope": {"queues": ["billing"]}, "warning_above": 20, "critical_above": 25},
+                   "enabled": True, "scope": {"queues": ["billing"]}, "warning_above": 20, "critical_above": 25,
+                   "resolve_at_or_below": None},
     }  # fmt: skip
     assert len(ok(client.get("/rules"))) == 9
     assert rule(client, "backlog.lead_billing.2") == body
@@ -713,3 +714,74 @@ def test_page_offers_new_rule_and_overlap_note(client: TestClient) -> None:
     assert "New rule from this one" in page
     assert ENABLED_NOTE in page
     assert OVERLAP_NOTE in page  # numeric card order (.2 ... .10) is checked in a real browser, not here
+
+
+# ---------------------------------------------------------------------------
+# J. Review fix — optional backlog recovery threshold (resolve_at_or_below)
+# ---------------------------------------------------------------------------
+
+RECOVERY_LABEL = "Resolve at or below (tickets)"
+RECOVERY_HINT = "Leave blank to resolve when tickets are at or below the warning threshold."
+SEEDED_BACKLOG_PREVIEW = ("Notify lead_billing when any queue they own (billing, vip) "
+                          "has more than 15 tickets waiting; critical above 20.")  # fmt: skip
+
+
+def test_seeded_backlog_rules_have_a_blank_recovery_threshold(client: TestClient) -> None:
+    rules = ok(client.get("/rules"))
+    assert [r["config"]["resolve_at_or_below"] for r in rules if r["template"] == "backlog"] == [None, None]
+    assert all("resolve_at_or_below" not in r["config"] for r in rules if r["template"] != "backlog")
+
+
+def test_patch_sets_and_clears_the_recovery_threshold(db: Path) -> None:
+    with running(db) as client:
+        body = ok(patch(client, BACKLOG_BILLING, {"resolve_at_or_below": 12}))
+        assert (body["version"], body["config"]["resolve_at_or_below"]) == (2, 12)
+        assert body["preview"] == SEEDED_BACKLOG_PREVIEW.removesuffix(".") + "; recovers at or below 12."
+    with running(db) as client:  # restart: the stored edit is replayed
+        assert rule(client, BACKLOG_BILLING)["config"]["resolve_at_or_below"] == 12
+        body = ok(patch(client, BACKLOG_BILLING, {"resolve_at_or_below": None}))
+        assert (body["version"], body["config"]["resolve_at_or_below"]) == (3, None)
+        assert body["preview"] == SEEDED_BACKLOG_PREVIEW
+
+
+@pytest.mark.parametrize(
+    ("changes", "detail"),
+    [
+        ({"resolve_at_or_below": 16}, "resolve_at_or_below must be at most warning_above"),
+        ({"resolve_at_or_below": -1}, "resolve_at_or_below: Input should be greater than or equal to 0"),
+        ({"resolve_at_or_below": 12.5}, "resolve_at_or_below: Input should be a valid integer"),
+        ({"resolve_at_or_below": "12"}, "resolve_at_or_below: Input should be a valid integer"),
+    ],
+    ids=["above-warning", "negative", "fraction", "string-number"],
+)
+def test_patch_rejects_invalid_recovery_threshold(client: TestClient, changes: dict[str, Any], detail: str) -> None:
+    before = rule(client, BACKLOG_BILLING)
+    response = patch(client, BACKLOG_BILLING, changes)
+    assert response.status_code == 422, response.text
+    assert detail in response.json()["detail"]
+    assert rule(client, BACKLOG_BILLING) == before
+
+
+def test_lowering_warning_below_recovery_needs_both_changes_together(client: TestClient) -> None:
+    ok(patch(client, BACKLOG_BILLING, {"resolve_at_or_below": 12}))
+    response = patch(client, BACKLOG_BILLING, {"warning_above": 10})
+    assert response.status_code == 422
+    assert "resolve_at_or_below must be at most warning_above" in response.json()["detail"]
+    body = ok(patch(client, BACKLOG_BILLING, {"warning_above": 10, "resolve_at_or_below": 8}))
+    assert (body["config"]["warning_above"], body["config"]["resolve_at_or_below"]) == (10, 8)
+
+
+def test_create_backlog_rule_with_recovery_threshold(client: TestClient) -> None:
+    body = created(create(client, {**R1_BODY, "resolve_at_or_below": 15}))
+    assert body["config"]["resolve_at_or_below"] == 15
+    assert body["preview"].endswith("critical above 25; recovers at or below 15.")
+    response = create(client, {**R1_BODY, "resolve_at_or_below": 21})
+    assert response.status_code == 422
+    assert "resolve_at_or_below must be at most warning_above" in response.json()["detail"]
+
+
+def test_page_offers_the_recovery_threshold_field(client: TestClient) -> None:
+    page = client.get("/").text
+    assert RECOVERY_LABEL in page
+    assert RECOVERY_HINT in page
+    assert "resolve_at_or_below" in page

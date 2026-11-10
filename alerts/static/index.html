@@ -318,8 +318,8 @@ function editForm(rule, error, mode = "edit") {
   const field = (label, input, extra) => el("label", {}, label, input, extra);
   // Each number field remembers how to turn its text into the API value.
   const numbers = [];
-  const num = (key, shown, toApi, step, extra) => {
-    const input = el("input", { type: "number", value: shown, step, min: "0", required: true });
+  const num = (key, shown, toApi, step, extra, optional = false) => {
+    const input = el("input", { type: "number", value: shown, step, min: "0", required: !optional });
     numbers.push({ key, input, shown, toApi });
     return [input, extra];
   };
@@ -342,7 +342,13 @@ function editForm(rule, error, mode = "edit") {
   if (rule.template === "backlog") {
     thresholds = [
       field("Warning when more than (tickets)", ...num("warning_above", String(c.warning_above), Number, "1")),
-      field("Critical when more than (tickets)", ...num("critical_above", String(c.critical_above), Number, "1"))];
+      field("Critical when more than (tickets)", ...num("critical_above", String(c.critical_above), Number, "1")),
+      // Optional: blank sends null, which means "resolve at or below the warning threshold" (Decision 108).
+      field("Resolve at or below (tickets)", ...num("resolve_at_or_below",
+        c.resolve_at_or_below === null ? "" : String(c.resolve_at_or_below),
+        v => v === "" ? null : Number(v), "1",
+        el("span", { class: "hint muted" }, "Leave blank to resolve when tickets are at or below the warning threshold."),
+        true))];
   } else if (rule.template === "sla") {
     const ratio = v => Number(v) / 100;
     thresholds = [
