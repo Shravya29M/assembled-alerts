@@ -4,6 +4,7 @@ The recovery scenario mixes events with an edit, a disable and a re-enable,
 so replaying with only the latest rules would give a different result.
 """
 
+import json
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
@@ -15,9 +16,22 @@ import pytest
 from alerts.engine import Engine, ReplayFinishedError
 from alerts.ingest import SourcedEvent, load_events
 from alerts.routing import RoutingError, seeded_rules
+from alerts.rules import Rule
 from alerts.storage import RecoveryMismatchError, StorageError, Store
 from tests.builders import at
 from tests.engine_builders import edited, engine_snapshot
+from tests.test_dataset_oracle import ORACLE
+from tests.test_rule_creation import (
+    R1,
+    R2,
+    R2_NEW_ROWS,
+    R3,
+    R4,
+    R4_NEW_ROWS,
+    R4_TOTAL,
+    oracle_shape,
+    split,
+)
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "events.jsonl"
 EVENTS: list[SourcedEvent] = load_events(DATA_PATH).accepted
@@ -53,6 +67,8 @@ def perform(target: Engine | Store, actions: list[Action]) -> None:
             target.disable_rule(arg)
         elif kind == "enable":
             target.enable_rule(arg)
+        elif kind == "add":
+            target.add_rule(arg)
         else:
             target.finish()
 
@@ -408,3 +424,154 @@ def test_error_after_engine_mutation_rebuilds(tmp_path: Path, monkeypatch: pytes
         store.step(sourced)
     store.finish()
     assert engine_snapshot(store.engine) == engine_snapshot(reference(plain_run()))
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.3 — created rules are journaled, recovered and kept across Reset
+# ---------------------------------------------------------------------------
+
+
+def with_rule_added_after(line: int, rule: Rule) -> list[Action]:
+    actions: list[Action] = []
+    for sourced in EVENTS:
+        actions.append(("event", sourced))
+        if sourced.line_number == line:
+            actions.append(("add", rule))
+    actions.append(("finish", None))
+    return actions
+
+
+def index_after_line(actions: list[Action], line: int) -> int:
+    return next(i for i, (kind, arg) in enumerate(actions) if kind == "event" and arg.line_number == line) + 1
+
+
+def test_rule_add_is_journaled_in_position(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.db"
+    store = Store.create(path, seeded_rules())
+    perform(store, with_rule_added_after(50, R2))
+    journal = store.journal()
+    added = [i for i, row in enumerate(journal) if row.kind == "rule_add"]
+    assert len(added) == 1
+    row = journal[added[0]]
+    assert (row.rule_id, row.rule_version, row.line_number) == ("adherence.lead_billing.2", 1, None)
+    assert json.loads(row.payload or "") == R2.model_dump(mode="json")
+    assert (journal[added[0] - 1].kind, journal[added[0] - 1].line_number) == ("event", 50)
+    assert (journal[added[0] + 1].kind, journal[added[0] + 1].line_number) == ("event", 51)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT template FROM journal WHERE kind = 'rule_add'").fetchall() == [("adherence",)]
+
+
+def test_recovery_replays_added_rule_mid_run(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.db"
+    actions = with_rule_added_after(50, R2)
+    split_at = index_after_line(actions, 60)
+
+    first = Store.create(path, seeded_rules())
+    perform(first, actions[:split_at])
+    expected = engine_snapshot(first.engine)  # includes R2's timer and version
+    first.close()
+
+    resumed = Store.open(path)
+    assert engine_snapshot(resumed.engine) == expected
+    perform(resumed, actions[split_at:])
+    assert engine_snapshot(resumed.engine) == engine_snapshot(reference(actions))
+    new, others = split(resumed.stored_notifications(), R2.rule_id)
+    assert (new, others) == (R2_NEW_ROWS, ORACLE)
+
+
+def test_added_then_edited_rule_survives_recovery(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.db"
+    edit = R3.model_copy(update={"min_duration_sec": 3600})
+    actions: list[Action] = [("event", s) for s in EVENTS if s.line_number <= 30]
+    actions += [("add", R3), ("update", edit)]
+    store = Store.create(path, seeded_rules())
+    perform(store, actions)
+    expected = engine_snapshot(store.engine)
+    store.close()
+
+    recovered = Store.open(path)
+    assert recovered.engine.rules[R3.rule_id] == edit
+    assert recovered.engine.rule_version(R3.rule_id) == 2
+    assert engine_snapshot(recovered.engine) == expected
+
+
+def test_rule_added_after_finish_survives_restart_and_reset(tmp_path: Path) -> None:
+    path = tmp_path / "alerts.db"
+    store = Store.create(path, seeded_rules())
+    perform(store, plain_run())
+    outputs = (store.stored_notifications(), store.stored_incidents())
+    store.add_rule(R4)
+    store.close()
+
+    reopened = Store.open(path)  # 1. still finished, rule kept, nothing new
+    assert reopened.engine.finished
+    assert (reopened.engine.rules[R4.rule_id], reopened.engine.rule_version(R4.rule_id)) == (R4, 1)
+    assert (reopened.stored_notifications(), reopened.stored_incidents()) == outputs
+    reopened.reset()
+    reopened.close()
+
+    after_reset = Store.open(path)  # 2. the baseline holds the new rule at version 1
+    assert after_reset.journal() == []
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT version FROM baseline_rules WHERE rule_id = ?", (R4.rule_id,)).fetchall() == [(1,)]
+    perform(after_reset, plain_run())  # 3. it runs on the next replay
+    new, others = split(after_reset.stored_notifications(), R4.rule_id)
+    assert (new, others) == (R4_NEW_ROWS, ORACLE)
+    assert len(after_reset.stored_notifications()) == R4_TOTAL
+    expected = engine_snapshot(after_reset.engine)
+    after_reset.close()
+
+    assert engine_snapshot(Store.open(path).engine) == expected  # 4. and survives another restart
+
+
+@pytest.mark.parametrize(
+    ("rule", "error", "match"),
+    [
+        (edited("backlog.lead_billing"), ValueError, "duplicate"),  # rule_id already exists
+        (R1.model_copy(update={"recipient": "lead_x"}), RoutingError, None),
+    ],
+    ids=["duplicate-rule-id", "bad-routing"],
+)
+def test_rejected_add_is_not_journaled_and_not_rebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rule: Rule, error: type[Exception], match: str | None
+) -> None:
+    store = Store.create(tmp_path / "alerts.db", seeded_rules())
+    for sourced in EVENTS[:50]:
+        store.step(sourced)
+    before = (store.journal(), store.stored_notifications(), store.stored_incidents(), engine_snapshot(store.engine))
+    recoveries = count_recoveries(monkeypatch)
+    with pytest.raises(error, match=match):
+        store.add_rule(rule)
+    assert recoveries == []
+    assert (store.journal(), store.stored_notifications(), store.stored_incidents(),
+            engine_snapshot(store.engine)) == before  # fmt: skip
+
+
+def test_failed_write_during_add_rolls_back(tmp_path: Path) -> None:
+    connections: list[FailingConnection] = []
+
+    def connect(target: str) -> FailingConnection:  # adding a rule writes only a journal row
+        connections.append(FailingConnection(sqlite3.connect(target), "journal"))
+        return connections[-1]
+
+    store = Store.create(tmp_path / "alerts.db", seeded_rules(), connect=connect)
+    for sourced in EVENTS[:50]:
+        store.step(sourced)
+    before = (store.journal(), engine_snapshot(store.engine))
+
+    connections[-1].armed = True
+    with pytest.raises(StorageError):
+        store.add_rule(R2)
+    connections[-1].armed = False
+
+    assert (store.journal(), engine_snapshot(store.engine)) == before
+    assert R2.rule_id not in store.engine.rules
+    store.add_rule(R2)
+    assert [row.kind for row in store.journal()].count("rule_add") == 1
+
+
+def test_seeded_store_without_additions_is_unchanged(tmp_path: Path) -> None:
+    store = Store.create(tmp_path / "alerts.db", seeded_rules())
+    perform(store, plain_run())
+    assert {row.kind for row in store.journal()} == {"event", "finish"}
+    assert oracle_shape(store.stored_notifications()) == ORACLE

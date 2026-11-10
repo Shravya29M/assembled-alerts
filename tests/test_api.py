@@ -29,10 +29,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from alerts.api import SourceMismatchError, create_app
-from alerts.storage import StorageError
+from alerts.storage import StorageError, Store
 from tests.builders import snapshot, state_change
 from tests.engine_builders import hm
 from tests.test_dataset_oracle import ORACLE
+from tests.test_rule_creation import R4_NEW_ROWS, R4_TOTAL
 
 DATA = Path(__file__).resolve().parent.parent / "data" / "events.jsonl"
 DATA_LINES = DATA.read_text(encoding="utf-8").splitlines()
@@ -591,3 +592,124 @@ def test_demo_workflow_edit_run_reset_restore(client: TestClient) -> None:
     restored = ok(patch(client, LONG_CALL_BILLING, {"min_duration_sec": 2700}))
     assert restored["version"] == 3
     assert oracle_rows(ok(client.post("/replay/run-all"))["notifications"]) == ORACLE
+
+
+# ---------------------------------------------------------------------------
+# I. Phase 5.3 — creating rules (POST /rules)
+# ---------------------------------------------------------------------------
+
+R1_BODY = {"template": "backlog", "recipient": "lead_billing", "scope": {"queues": ["billing"]},
+           "warning_above": 20, "critical_above": 25}  # fmt: skip
+R4_BODY = {"template": "long_call", "recipient": "lead_support", "scope": "all_owned", "min_duration_sec": 1800}
+OVERLAP_NOTE = "A new rule works independently. If two rules cover the same queue or agent, the lead may get one alert from each."
+ENABLED_NOTE = ("New rules are enabled by default, even when copied from a disabled rule. "
+                "You can disable the new rule after creating it.")
+
+
+def create(client: TestClient, body: Any) -> Any:
+    return client.post("/rules", json=body)
+
+
+def created(response: Any) -> Any:
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def new_rows(notifications: list[dict[str, Any]], rule_id: str) -> list[tuple[Any, ...]]:
+    """The same shape as the R*_NEW_ROWS constants in tests/test_rule_creation.py."""
+    return [
+        (n["seq"], n["line_number"], n["rule_id"], n["subject_id"], n["kind"], n["severity"],
+         clock(n["effective_at"]), clock(n["emitted_at"]), n["rule_version"])
+        for n in notifications if n["rule_id"] == rule_id
+    ]  # fmt: skip
+
+
+def test_create_rule_returns_201_with_generated_id(client: TestClient) -> None:
+    body = created(create(client, R1_BODY))
+    assert body == {
+        "rule_id": "backlog.lead_billing.2",
+        "template": "backlog",
+        "version": 1,
+        "enabled": True,
+        "preview": "Notify lead_billing when any listed queue (billing) has more than 20 tickets waiting; "
+                   "critical above 25.",
+        "config": {"rule_id": "backlog.lead_billing.2", "recipient": "lead_billing", "cross_owner": False,
+                   "enabled": True, "scope": {"queues": ["billing"]}, "warning_above": 20, "critical_above": 25},
+    }  # fmt: skip
+    assert len(ok(client.get("/rules"))) == 9
+    assert rule(client, "backlog.lead_billing.2") == body
+
+
+def test_create_rule_uses_template_defaults(client: TestClient) -> None:
+    body = created(create(client, {"template": "long_call", "recipient": "lead_support", "scope": "all_owned"}))
+    assert body["rule_id"] == "long_call.lead_support.2"
+    assert body["config"]["min_duration_sec"] == 2700  # PLAN §4 default
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        ({**R1_BODY, "rule_id": "backlog.lead_billing.2"}, "rule_id is assigned by the server."),
+        ({**R1_BODY, "template": "forecast"}, "template"),
+        ({k: v for k, v in R1_BODY.items() if k != "template"}, "template"),
+        ({k: v for k, v in R1_BODY.items() if k != "recipient"}, "recipient"),
+        ({**R1_BODY, "colour": "red"}, "colour"),
+        ({**R1_BODY, "warning_above": "20"}, "warning_above"),
+        ({**R1_BODY, "warning_above": 25, "critical_above": 20}, "critical_above"),
+        ({**R1_BODY, "scope": {"queues": ["tier_2"]}}, "tier_2"),  # owned by lead_support
+        ([R1_BODY], None),
+    ],
+    ids=["rule-id-given", "unknown-template", "missing-template", "missing-recipient", "unknown-field",
+         "wrong-type", "critical-not-above-warning", "cross-owner-without-flag", "not-an-object"],
+)  # fmt: skip
+def test_create_rule_rejections(db: Path, body: Any, detail: str | None) -> None:
+    with running(db) as client:
+        before = everything(client)
+        response = create(client, body)
+        assert response.status_code == 422, response.text
+        if detail is not None:
+            assert detail in str(response.json()["detail"])
+        assert everything(client) == before
+    store = Store.open(db)  # the app's connection is closed; read the journal directly
+    assert store.journal() == []
+    store.close()
+
+
+def test_created_rule_can_be_patched(client: TestClient) -> None:
+    rule_id = created(create(client, {**R4_BODY, "min_duration_sec": 2700}))["rule_id"]
+    edited_rule = ok(patch(client, rule_id, {"min_duration_sec": 1800}))
+    assert (edited_rule["version"], edited_rule["config"]["min_duration_sec"]) == (2, 1800)
+
+
+def test_create_after_finish_then_reset_runs_it(client: TestClient) -> None:
+    ok(client.post("/replay/run-all"))
+    finished = status(client)
+    rule_id = created(create(client, R4_BODY))["rule_id"]
+    assert rule_id == "long_call.lead_support.2"
+    assert status(client) == finished  # nothing scheduled or emitted after finish
+
+    ok(client.post("/replay/reset"))
+    ok(client.post("/replay/run-all"))
+    notifications = ok(client.get("/notifications"))
+    assert new_rows(notifications, rule_id) == R4_NEW_ROWS
+    assert [row for row in oracle_rows(notifications) if row[2] != rule_id] == ORACLE
+    assert len(notifications) == R4_TOTAL
+
+
+def test_created_rule_survives_server_restart(db: Path) -> None:
+    with running(db) as client:
+        body = created(create(client, R1_BODY))
+    with running(db) as client:
+        assert rule(client, body["rule_id"]) == body
+
+
+def test_post_rules_runs_on_the_sqlite_thread(client: TestClient) -> None:
+    # Separate from test_every_endpoint_runs_on_the_sqlite_thread, which expects 200 everywhere.
+    assert create(client, R1_BODY).status_code == 201
+
+
+def test_page_offers_new_rule_and_overlap_note(client: TestClient) -> None:
+    page = client.get("/").text
+    assert "New rule from this one" in page
+    assert ENABLED_NOTE in page
+    assert OVERLAP_NOTE in page  # numeric card order (.2 ... .10) is checked in a real browser, not here

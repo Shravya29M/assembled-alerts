@@ -46,6 +46,7 @@ STORAGE_ERROR_DETAIL = "The alert store could not complete this operation. See t
 RESET_MESSAGE = "Replay history cleared; current rule configurations and versions are kept."
 FINISHED_DETAIL = "The replay is finished. Press Reset to clear history and replay again."
 _MISMATCH_HINT = "Restore the original events file, or delete the database file to start a new replay."
+_TEMPLATE_BY_NAME = {name: cls for cls, name in TEMPLATE_NAMES.items()}  # "backlog" -> BacklogRule, ...
 
 
 class SourceMismatchError(RuntimeError):
@@ -207,6 +208,33 @@ def create_app(db_path: Path | None = None, events_path: Path | None = None) -> 
         return {"message": RESET_MESSAGE, "status": status()}
 
     # -- rule editing -------------------------------------------------------
+
+    @app.post("/rules", status_code=201)
+    async def create_rule(request: Request) -> dict[str, Any]:
+        """Create a rule from a template; the server assigns its ID. Allowed after finish (Decision 100)."""
+        try:
+            body = await request.json()  # read first: no `await` after this point
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="The request body must be a JSON object of rule fields.")
+        if "rule_id" in body:
+            raise HTTPException(status_code=422, detail="rule_id is assigned by the server.")
+        template = body.pop("template", None)
+        if template not in _TEMPLATE_BY_NAME:
+            raise HTTPException(status_code=422, detail=f"template: must be one of {', '.join(_TEMPLATE_BY_NAME)}.")
+        recipient = body.get("recipient")
+        if not isinstance(recipient, str):
+            raise HTTPException(status_code=422, detail="recipient: a lead ID (string) is required.")
+        rule_id = store().engine.new_rule_id(template, recipient)
+        try:
+            store().add_rule(_TEMPLATE_BY_NAME[template].model_validate({**body, "rule_id": rule_id}))
+        except ValidationError as err:
+            raise HTTPException(status_code=422, detail=describe_validation_error(err)) from err
+        except RoutingError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
+        engine = store().engine
+        return rule_json(engine.rules[rule_id], engine.rule_version(rule_id))
 
     @app.patch("/rules/{rule_id}")
     async def edit_rule(rule_id: str, request: Request) -> dict[str, Any]:

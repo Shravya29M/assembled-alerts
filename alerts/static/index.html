@@ -179,6 +179,10 @@
 const LEADS = ["lead_billing", "lead_support"];
 const TEMPLATE_ORDER = ["backlog", "sla", "adherence", "long_call"];
 const TEMPLATE_LABEL = { backlog: "Backlog", sla: "SLA", adherence: "Adherence", long_call: "Long call" };
+const OVERLAP_NOTE =
+  "A new rule works independently. If two rules cover the same queue or agent, the lead may get one alert from each.";
+const ENABLED_NOTE =
+  "New rules are enabled by default, even when copied from a disabled rule. You can disable the new rule after creating it.";
 let highlighted = new Set();  // notification seqs added by the last Step (Run All highlights nothing)
 let lastStatus = null;        // the status as last drawn; Run All uses it to describe what it processed
 let incidentFilter = "all";
@@ -293,6 +297,9 @@ function ruleCard(rule) {
       el("label", { class: "small" }, toggle, "Enabled")),
     el("div", { class: "preview" }, rule.preview),
     el("details", {}, el("summary", { class: "small" }, "Edit"), editForm(rule, error)),
+    el("details", {}, el("summary", { class: "small" }, "New rule from this one"),
+      el("p", { class: "note" }, ENABLED_NOTE), el("p", { class: "note" }, OVERLAP_NOTE),
+      editForm(rule, error, "create")),
     error);
 }
 
@@ -302,7 +309,9 @@ const percent = ratio => String(Math.round(ratio * 10000) / 100);   // 0.8 -> "8
 const minutes = seconds => String(Math.round(seconds / 60 * 100) / 100);  // 2700 -> "45", 90 -> "1.5"
 const toSeconds = value => Math.round(Number(value) * 60);
 
-function editForm(rule, error) {
+// mode "edit" PATCHes only the changed fields; mode "create" POSTs a new rule: this rule's
+// config with the changed fields applied. The server assigns the new rule's ID.
+function editForm(rule, error, mode = "edit") {
   const c = rule.config;
   const queues = rule.template === "backlog" || rule.template === "sla";
   const originalList = c.scope === "all_owned" ? [] : (queues ? c.scope.queues : c.scope.agents);
@@ -370,6 +379,15 @@ function editForm(rule, error) {
     for (const { key, input, shown, toApi } of numbers) {
       if (input.value !== shown) changes[key] = toApi(input.value);
     }
+    if (mode === "create") {
+      const { rule_id, enabled, ...config } = c;  // a new rule gets a new ID and starts enabled
+      try {
+        const made = await api("POST", "/rules", { template: rule.template, ...config, ...changes });
+        showMessage(`${made.rule_id} created as version 1.`, "ok");
+        await refresh();
+      } catch (err) { error.textContent = err.message; }
+      return;
+    }
     if (Object.keys(changes).length === 0) {
       status.textContent = "No changes to save.";
       return;
@@ -381,7 +399,8 @@ function editForm(rule, error) {
     } catch (err) { error.textContent = err.message; }
   }},
     field("Recipient", recipient), field("Scope", scopeMode), listedFields, thresholds,
-    el("div", { class: "wide form-actions" }, el("button", { type: "submit", class: "primary" }, "Save"), status));
+    el("div", { class: "wide form-actions" },
+      el("button", { type: "submit", class: "primary" }, mode === "create" ? "Create rule" : "Save"), status));
   return form;
 }
 
@@ -393,7 +412,7 @@ function renderRules(rules) {
   }
   document.getElementById("rules").replaceChildren(...[...byLead].map(([lead, list]) => {
     list.sort((a, b) => TEMPLATE_ORDER.indexOf(a.template) - TEMPLATE_ORDER.indexOf(b.template)
-                        || a.rule_id.localeCompare(b.rule_id));
+                        || a.rule_id.localeCompare(b.rule_id, undefined, { numeric: true }));  // .2 < .10
     return el("div", {}, el("h2", {}, `Notifies ${lead}`),
       el("div", { class: "cards" }, list.length ? list.map(ruleCard) : el("div", { class: "empty" }, "No rules.")));
   }));

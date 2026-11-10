@@ -75,13 +75,13 @@ class RecoveryMismatchError(StorageError):
 @dataclass(frozen=True)
 class JournalRow:
     seq: int
-    kind: str  # event | rule_change | finish
+    kind: str  # event | rule_change | rule_add | finish
     line_number: int | None
     event_id: str | None
     outcome: str | None
     rule_id: str | None
     rule_version: int | None
-    payload: str | None = None  # the event JSON, or the rule config JSON for a rule_change
+    payload: str | None = None  # the event JSON, or the rule config JSON for a rule_change or rule_add
 
 
 @dataclass(frozen=True)
@@ -196,6 +196,15 @@ class Store:
 
     def update_rule(self, rule: Rule) -> list[Notification]:
         return self._change_rule(self._live().validate_rule(rule))  # pre-check: no side effects
+
+    def add_rule(self, rule: Rule) -> list[Notification]:
+        """Add a new rule at version 1, journaled as `rule_add` in the same transaction."""
+        rule = self._live().validate_new_rule(rule)  # pre-check: no side effects, so no rebuild
+        before = self._mark()
+        emitted = self._apply(lambda engine: engine.add_rule(rule))
+        self._persist(before, _Entry("rule_add", payload=rule.model_dump_json(), rule_id=rule.rule_id,
+                                     template=_TEMPLATE_OF[type(rule)], rule_version=1))  # fmt: skip
+        return emitted
 
     def disable_rule(self, rule_id: str) -> list[Notification]:
         return self._change_rule(self._flipped(rule_id, enabled=False))
@@ -320,8 +329,12 @@ def _recover(conn: Any) -> Engine:
                 actual = engine.step(SourcedEvent(line_number, parse_event(payload))).outcome
                 if actual != outcome:
                     raise RecoveryMismatchError(f"journal row {seq}: stored outcome {outcome}, replay gave {actual}")
-            elif kind == "rule_change":
-                engine.update_rule(_TEMPLATES[template].model_validate_json(payload))
+            elif kind in ("rule_change", "rule_add"):
+                rule = _TEMPLATES[template].model_validate_json(payload)
+                if kind == "rule_add":
+                    engine.add_rule(rule)  # the stored ID is reused, never generated again
+                else:
+                    engine.update_rule(rule)
                 if engine.rule_version(rule_id) != rule_version:
                     raise RecoveryMismatchError(f"journal row {seq}: stored version {rule_version}, "
                                                 f"replay gave {engine.rule_version(rule_id)}")  # fmt: skip

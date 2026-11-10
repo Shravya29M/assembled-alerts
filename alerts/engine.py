@@ -153,6 +153,38 @@ class Engine:
         validate_routing(rule)
         return rule
 
+    def add_rule(self, rule: Rule) -> list[Notification]:
+        """Add a new rule at version 1. Always returns []: a new rule never alerts retroactively.
+
+        Queue rules apply from the next snapshot. Duration rules get timers from current
+        state, max(due, now), like an edit (Decision 45); after finish() nothing is
+        scheduled until reset() (Decisions 66, 68).
+        """
+        rule = self.validate_new_rule(rule)  # all checks run before any state changes
+        self.rules[rule.rule_id] = rule
+        self._versions[rule.rule_id] = 1
+        if rule.enabled and isinstance(rule, (LongCallRule, AdherenceRule)) and not self._finished:
+            self._recompute_timers(rule)
+        return []
+
+    def validate_new_rule(self, rule: Rule) -> Rule:
+        """Every check add_rule makes, with no side effects. Returns the validated rule.
+
+        Raises ValidationError (config), ValueError (duplicate rule_id) or RoutingError.
+        """
+        rule = _validated(rule)
+        if rule.rule_id in self.rules:
+            raise ValueError(f"duplicate rule_id {rule.rule_id!r}")
+        validate_routing(rule)
+        return rule
+
+    def new_rule_id(self, template: str, recipient: str) -> str:
+        """`{template}.{recipient}.{n}` with the smallest unused n >= 2 (the seeded rule is n = 1)."""
+        n = 2
+        while f"{template}.{recipient}.{n}" in self.rules:
+            n += 1
+        return f"{template}.{recipient}.{n}"
+
     # -- views --------------------------------------------------------------
 
     @property
