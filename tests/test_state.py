@@ -6,6 +6,7 @@ and checks outcomes, state and diagnostics.
 
 import pytest
 
+from alerts.models import AdherenceCheck
 from alerts.rules import BacklogRule, evaluate
 from tests.builders import (
     adherence,
@@ -296,3 +297,106 @@ def test_missing_forecast_is_flagged_and_snapshot_kept() -> None:
     assert outcomes == ["accepted"]
     assert state.queues["billing"] == event
     assert diagnostic_keys(state.diagnostics) == [("forecast_missing", "billing", 1)]
+
+
+# ---------------------------------------------------------------------------
+# A7. Unfamiliar agent states (Phase 5.2): accepted, but made visible
+# ---------------------------------------------------------------------------
+
+KNOWN_STATES = ["available", "on_call", "on_break", "in_meeting", "offline"]
+
+
+@pytest.mark.parametrize("known", KNOWN_STATES)
+def test_known_agent_states_are_not_flagged(known: str) -> None:
+    state, outcomes = run(
+        state_change("09:00", "a_11", known, previous_state=known),
+        adherence("09:05", "a_11", in_violation=False, actual_state=known),
+    )
+    assert outcomes == ["accepted", "accepted"]
+    assert state.diagnostics == []
+
+
+def test_unfamiliar_new_state_is_flagged_and_does_not_start_a_call() -> None:
+    # A typo of on_call is accepted, but it is not a call, so the lead is told.
+    state, outcomes = run(state_change("09:10", "a_11", "on-call"))
+    assert outcomes == ["accepted"]
+    assert diagnostic_keys(state.diagnostics) == [("unknown_agent_state", "a_11", 1)]
+    detail = state.diagnostics[0].detail
+    assert "new_state" in detail and "on-call" in detail
+    assert state.calls["a_11"].state == "on-call"
+    assert state.calls["a_11"].on_call_since is None
+
+
+def test_unfamiliar_previous_state_is_flagged() -> None:
+    state, _ = run(state_change("09:10", "a_11", "on_call", previous_state="lunch"))
+    assert diagnostic_keys(state.diagnostics) == [("unknown_agent_state", "a_11", 1)]
+    detail = state.diagnostics[0].detail
+    assert "previous_state" in detail and "lunch" in detail
+    assert state.calls["a_11"].on_call_since == at("09:10")
+
+
+def test_unfamiliar_adherence_states_are_flagged() -> None:
+    actual = adherence("09:36", "a_19", in_violation=True, started="09:35", actual_state="Lunch")
+    # The builder always schedules "available"; validate a copy with another value.
+    scheduled = AdherenceCheck.model_validate(
+        {**adherence("09:40", "a_19", in_violation=True).model_dump(), "scheduled_state": "training"}
+    )
+    state, outcomes = run(actual, scheduled)
+    assert outcomes == ["accepted", "accepted"]
+    assert diagnostic_keys(state.diagnostics) == [
+        ("unknown_agent_state", "a_19", 1),
+        ("unknown_agent_state", "a_19", 2),
+    ]
+    assert "actual_state" in state.diagnostics[0].detail
+    assert "scheduled_state" in state.diagnostics[1].detail
+    assert state.adherence["a_19"].effective_start == at("09:35")  # behaviour unchanged
+
+
+def test_each_unfamiliar_field_in_one_event_is_flagged_separately() -> None:
+    state, _ = run(state_change("09:10", "a_11", "on-call", previous_state="lunch"))
+    assert diagnostic_keys(state.diagnostics) == [
+        ("unknown_agent_state", "a_11", 1),
+        ("unknown_agent_state", "a_11", 1),
+    ]
+    first, second = (d.detail for d in state.diagnostics)  # model field order
+    assert "previous_state" in first and "lunch" in first
+    assert "new_state" in second and "on-call" in second
+
+
+@pytest.mark.parametrize("value", ["ON_CALL", " on_call"], ids=["upper-case", "leading-space"])
+def test_unnormalized_on_call_is_kept_flagged_and_not_a_call(value: str) -> None:
+    # Values are never normalized: the source must say exactly "on_call".
+    state, outcomes = run(state_change("09:10", "a_11", value))
+    assert outcomes == ["accepted"]
+    assert diagnostic_keys(state.diagnostics) == [("unknown_agent_state", "a_11", 1)]
+    assert repr(value) in state.diagnostics[0].detail  # quotes make the space visible
+    assert state.calls["a_11"].state == value
+    assert state.calls["a_11"].on_call_since is None
+
+    exact, _ = run(state_change("09:10", "a_11", "on_call"))  # control
+    assert exact.diagnostics == []
+    assert exact.calls["a_11"].on_call_since == at("09:10")
+
+
+def test_repeated_unfamiliar_state_is_flagged_on_each_accepted_event() -> None:
+    # The second event repeats the state, so it is not a new transition,
+    # but it still carries an unfamiliar label.
+    state, _ = run(
+        state_change("09:10", "a_11", "lunch"),
+        state_change("09:20", "a_11", "lunch"),
+    )
+    assert diagnostic_keys(state.diagnostics) == [
+        ("unknown_agent_state", "a_11", 1),
+        ("unknown_agent_state", "a_11", 2),
+    ]
+
+
+def test_unfamiliar_state_on_stale_or_duplicate_event_is_not_flagged() -> None:
+    # Only accepted events are checked; rejected ones change nothing (Decision 5).
+    state, outcomes = run(
+        state_change("09:30", "a_11", "available", event_id="evt_x"),
+        state_change("09:20", "a_11", "on-call"),  # older than 09:30: stale
+        state_change("09:40", "a_11", "on-call", event_id="evt_x"),  # same id: duplicate
+    )
+    assert outcomes == ["accepted", "stale", "duplicate"]
+    assert diagnostic_keys(state.diagnostics) == [("duplicate_payload_differs", "evt_x", 3)]

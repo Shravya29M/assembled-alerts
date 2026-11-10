@@ -516,6 +516,25 @@ def test_engine_diagnostics_from_synthetic_source(tmp_path: Path, db: Path) -> N
     ]
 
 
+def test_unknown_agent_state_diagnostic_visible_and_stable_across_restart(tmp_path: Path, db: Path) -> None:
+    lines = [
+        state_change("09:00", "a_11", "on_call").model_dump_json(),
+        state_change("09:20", "a_11", "lunch", previous_state="on_call").model_dump_json(),  # unfamiliar new_state
+        state_change("09:30", "a_11", "offline", previous_state="lunch").model_dump_json(),  # unfamiliar previous_state
+    ]
+    events = write_events(tmp_path / "events.jsonl", lines)
+    with running(db, events) as client:
+        status = ok(client.post("/replay/run-all"))["status"]
+        assert (status["counts"]["accepted"], status["counts"]["notifications"]) == (3, 0)
+        diagnostics = ok(client.get("/diagnostics"))
+    assert [(d["line_number"], d["kind"], d["subject_id"], d["source"]) for d in diagnostics] == [
+        (2, "unknown_agent_state", "a_11", "replay"),
+        (3, "unknown_agent_state", "a_11", "replay"),
+    ]
+    with running(db, events) as client:
+        assert ok(client.get("/diagnostics")) == diagnostics  # rebuilt from the journal, not doubled
+
+
 def test_storage_failure_gives_safe_message(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     def failing_step(*_: Any) -> None:
         raise StorageError("disk I/O error writing /secret/path/alerts.db")

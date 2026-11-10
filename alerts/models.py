@@ -14,12 +14,20 @@ def _to_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _not_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must not be empty or whitespace only")
+    return value  # kept exactly as sent, never stripped or lower-cased
+
+
 # Reusable field types. Annotated[base, extra rules] attaches constraints to a type.
 UtcDatetime = Annotated[AwareDatetime, AfterValidator(_to_utc)]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveInt = Annotated[int, Field(gt=0)]
-AgentState = Literal["available", "on_call", "on_break", "in_meeting"]
+# Any non-blank string (Decision 99): the assignment's list of states ends in "etc.".
+# ReplayState flags values outside KNOWN_AGENT_STATES as diagnostics.
+AgentState = Annotated[str, AfterValidator(_not_blank)]
 
 
 class _EventBase(BaseModel):

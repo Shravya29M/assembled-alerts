@@ -196,17 +196,53 @@ def test_no_type_coercion(record: dict[str, Any], field: str) -> None:
     assert_rejected_naming(line(record), field)
 
 
+# The four agent-state fields, with the builder for the event type that has each one.
+STATE_FIELDS = [
+    (state_change, "new_state"),
+    (state_change, "previous_state"),
+    (adherence, "actual_state"),
+    (adherence, "scheduled_state"),
+]
+STATE_FIELD_IDS = [field for _, field in STATE_FIELDS]
+
+
+@pytest.mark.parametrize("value", ["offline", "lunch"])
+@pytest.mark.parametrize(("build", "field"), STATE_FIELDS, ids=STATE_FIELD_IDS)
+def test_any_nonempty_agent_state_accepted(build: Any, field: str, value: str) -> None:
+    # The assignment lists "available, on_call, on_break, in_meeting, offline, etc."
+    event = parse_event(line(build(**{field: value})))
+    assert getattr(event, field) == value
+
+
+@pytest.mark.parametrize("value", ["ON_CALL", " on_call"], ids=["upper-case", "leading-space"])
+def test_agent_state_kept_exactly_as_sent(value: str) -> None:
+    assert parse_event(line(state_change(new_state=value))).new_state == value
+
+
+@pytest.mark.parametrize("value", ["", " ", "\t\n"], ids=["empty", "space", "tab-newline"])
+@pytest.mark.parametrize(("build", "field"), STATE_FIELDS, ids=STATE_FIELD_IDS)
+def test_blank_agent_state_rejected(build: Any, field: str, value: str) -> None:
+    assert_rejected_naming(line(build(**{field: value})), field)
+
+
 @pytest.mark.parametrize(
-    ("record", "field"),
-    [
-        (state_change(new_state="offline"), "new_state"),
-        (state_change(previous_state="offline"), "previous_state"),
-        (adherence(actual_state="offline"), "actual_state"),
-        (adherence(scheduled_state="offline"), "scheduled_state"),
-    ],
+    ("build", "field"),
+    [(state_change, "new_state"), (adherence, "actual_state"), (adherence, "scheduled_state")],
+    ids=["new_state", "actual_state", "scheduled_state"],
 )
-def test_unknown_agent_state_rejected(record: dict[str, Any], field: str) -> None:
-    assert_rejected_naming(line(record), field)
+def test_null_agent_state_rejected_where_required(build: Any, field: str) -> None:
+    # previous_state stays nullable: see test_null_optional_fields_preserved.
+    assert_rejected_naming(line(build(**{field: None})), field)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1, True, ["on_call"], {"state": "on_call"}],
+    ids=["int", "bool", "list", "object"],
+)
+@pytest.mark.parametrize(("build", "field"), STATE_FIELDS, ids=STATE_FIELD_IDS)
+def test_non_string_agent_state_rejected(build: Any, field: str, value: Any) -> None:
+    assert_rejected_naming(line(build(**{field: value})), field)
 
 
 @pytest.mark.parametrize(

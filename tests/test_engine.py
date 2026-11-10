@@ -121,6 +121,39 @@ def test_stale_snapshot_that_would_alert_is_ignored_by_the_engine() -> None:
     assert engine.state.queues["billing"].tickets_waiting == 3
 
 
+def a11_offline(ts: str) -> object:
+    return state_change(ts, "a_11", "offline", previous_state="on_call")
+
+
+def test_exit_to_offline_before_deadline_cancels_timer() -> None:
+    driver = Driver()
+    driver.send(a11_on_call())
+    assert driver.send(a11_offline("09:30")) == []
+    assert driver.engine.pending_timers() == {}
+    assert driver.send(quiet("10:00")) == []  # past the old 09:55 deadline
+    assert driver.engine.notifications == []
+
+
+def test_exit_to_offline_after_alert_resolves_incident() -> None:
+    driver = Driver()
+    driver.send(a11_on_call())
+    assert brief(driver.send(quiet("09:56"))) == [(LONG_A11, "a_11", "opened", None, "09:55", "09:56")]
+    assert brief(driver.send(a11_offline("10:05"))) == [
+        (LONG_A11, "a_11", "resolved", None, "10:05", "10:05"),
+    ]
+    assert {key: incident.status for key, incident in driver.engine.incidents.items()} == {
+        "long_call.lead_support:a_11:1": "resolved",
+    }
+
+
+def test_offline_then_on_call_starts_new_episode() -> None:
+    driver = Driver()
+    driver.send(a11_on_call(), a11_offline("09:30"))
+    driver.send(state_change("10:00", "a_11", "on_call", previous_state="offline"))
+    assert driver.engine.pending_timers() == {(LONG_A11, "a_11"): at("10:45")}
+    assert brief(driver.send(quiet("10:46"))) == [(LONG_A11, "a_11", "opened", None, "10:45", "10:46")]
+
+
 def test_adherence_clear_cancels_timer() -> None:
     driver = Driver()
     driver.send(

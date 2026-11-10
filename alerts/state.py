@@ -19,6 +19,9 @@ from alerts.models import AdherenceCheck, AgentState, AgentStateChange, Event, Q
 
 Outcome = Literal["accepted", "duplicate", "stale"]
 
+# States the assignment names. Others are accepted but flagged (Decision 99).
+KNOWN_AGENT_STATES = frozenset({"available", "on_call", "on_break", "in_meeting", "offline"})
+
 
 @dataclass(frozen=True)
 class Diagnostic:
@@ -106,6 +109,8 @@ class ReplayState:
             self._record("forecast_missing", event.queue_id, line, "volume_forecast_next_15m is null")
 
     def _apply_state_change(self, event: AgentStateChange, line: int) -> None:
+        self._flag_unknown_states(event.agent_id, line,
+                                  [("previous_state", event.previous_state), ("new_state", event.new_state)])
         current = self.calls.get(event.agent_id)
         reported = event.previous_state_duration_sec
         if current is not None and reported is not None:
@@ -125,6 +130,8 @@ class ReplayState:
         )
 
     def _apply_adherence(self, event: AdherenceCheck, line: int) -> None:
+        self._flag_unknown_states(event.agent_id, line,
+                                  [("scheduled_state", event.scheduled_state), ("actual_state", event.actual_state)])
         current = self.adherence.get(event.agent_id)
         reported = event.violation_started_at
 
@@ -159,6 +166,13 @@ class ReplayState:
         if call is not None and call.state != event.actual_state:
             self._record("conflicting_activity", event.agent_id, line,
                          f"adherence says {event.actual_state}; authoritative state is {call.state}")
+
+    def _flag_unknown_states(self, agent_id: str, line: int, fields: list[tuple[str, str | None]]) -> None:
+        """One diagnostic per unfamiliar state field; the value is shown exactly as sent."""
+        for field, value in fields:
+            if value is not None and value not in KNOWN_AGENT_STATES:
+                self._record("unknown_agent_state", agent_id, line,
+                             f"{field} {value!r} is not a known agent state")
 
     def _record(self, kind: str, subject_id: str, line: int, detail: str) -> None:
         self.diagnostics.append(Diagnostic(kind, subject_id, line, detail))
