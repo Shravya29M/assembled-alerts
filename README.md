@@ -169,13 +169,13 @@ PLAN.md is kept as the original plan. Since then, rule creation was added (Decis
 
 ## AI-assisted development
 
-I used Claude Code extensively for implementation, test development, and documentation, with ChatGPT as a supplementary tool for technical explanations, design review, and evaluating tradeoffs.
+I used Claude Code extensively to generate and refine implementation code, automated tests, and documentation, with ChatGPT supporting technical explanations, design reviews, and evaluation of engineering tradeoffs.
 
-I approached the project in phases, reviewing proposed designs and test plans before proceeding with implementation. I used AI to accelerate repetitive development work while focusing my decisions on system behavior, alert correctness, persistence, and keeping the solution within the assignment's scope. AI tools proposed designs and options; I made the final scope and behavior decisions, for example adding configurable rule creation, keeping exact `on_call` matching, and excluding production deployment.
+I organized development around explicit approval checkpoints, making final decisions on product scope, alert behavior, and engineering tradeoffs. These included adding configurable rule creation, defining agent-state handling, and keeping unnecessary deployment infrastructure outside the assignment's scope.
 
-To verify the implementation, I used an independently established expected-output oracle, automated tests covering rule evaluation, event processing, timers, recovery, and APIs, and Playwright browser checks for the dashboard. I also validated installation and execution from clean environments.
+I evaluated the implementation against an expected-output oracle established before the engine was built, automated tests, Playwright browser checks, and reproducible clean-environment runs.
 
-I deliberately kept production deployment, authentication, external notification integrations, and additional infrastructure outside the implementation scope. Key design decisions, tradeoffs, and known limitations are documented in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+This approach reflects how I use AI as a development tool while maintaining responsibility for requirements, technical decisions, verification, and understanding the resulting system.
 
 The working rules for the AI-assisted, phase-by-phase workflow are in [`CLAUDE.md`](CLAUDE.md). The Playwright scripts are not part of this repository.
 

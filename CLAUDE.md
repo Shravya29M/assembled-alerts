@@ -164,4 +164,4 @@ Never:
 - Make technical decisions on my behalf when the plan is ambiguous.
 - Commit changes before I have reviewed and approved them.
 
-**At the beginning of our work, read `docs/PLAN.md` and inspect the project structure. Tell me which phase we should start with, explain its goal, and wait for my approval. Do not write code yet. And never mention anthropic or claude as the co-author, it should always be me.**
+**At the beginning of our work, read `docs/PLAN.md` and inspect the project structure. Tell me which phase we should start with, explain its goal, and wait for my approval. Do not write code yet.**
