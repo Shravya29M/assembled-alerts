@@ -12,7 +12,7 @@ I focused on team leads because they directly manage queues and agents and can a
 
 ## Quick start
 
-The repository is private; reviewer access is granted separately (a ZIP of the repository works the same way).
+The repository is public, so it can be cloned directly (a ZIP of the repository works the same way).
 
 **With [uv](https://docs.astral.sh/uv/)** (installs Python 3.12 from `.python-version` if needed, and the exact versions in `uv.lock`):
 
