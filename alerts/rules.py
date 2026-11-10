@@ -2,12 +2,12 @@
 
 evaluate(rule, subject_state, clock) looks at one subject's current state and
 returns a Decision. It reads nothing else, writes nothing, and knows nothing
-about incidents, notifications or timers. Phase 3 decides what to do with the
-Decision.
+about incidents, notifications or timers. The engine coordinates rule
+decisions, while alerts/incidents.py manages incident state transitions.
 
 Every rule carries an `enabled` field, but evaluate deliberately ignores it:
-returning "clear" for a disabled rule would look like a recovery. Phase 3
-(planned) skips disabled rules and closes their incidents as disabled.
+returning "clear" for a disabled rule would look like a recovery. The engine
+skips disabled rules and closes their open incidents as disabled.
 """
 
 from dataclasses import dataclass
@@ -32,7 +32,7 @@ class Decision:
 
 
 # ---------------------------------------------------------------------------
-# Scope: which subjects a rule covers. Phase 3 resolves it to real subjects.
+# Scope: which subjects a rule covers. alerts/routing.py resolves it to real subjects.
 # ---------------------------------------------------------------------------
 
 
@@ -46,7 +46,7 @@ class AgentScope(BaseModel):
     agents: Annotated[list[NonEmptyStr], Field(min_length=1)]
 
 
-AllOwned = Literal["all_owned"]  # every subject the recipient owns (Phase 3)
+AllOwned = Literal["all_owned"]  # every subject the recipient owns (see alerts/routing.py)
 
 
 # ---------------------------------------------------------------------------

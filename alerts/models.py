@@ -1,7 +1,7 @@
 """Typed event models: the schema for one line of data/events.jsonl.
 
-Structural validation only. Deduplication, freshness, the clock, state and
-rules live in later phases.
+Structural validation only. Deduplication, freshness, the clock and state live
+in alerts/state.py; rules in alerts/rules.py.
 """
 
 from datetime import UTC, datetime
