@@ -163,6 +163,7 @@
       All times are UTC. Rows added by the last Step are highlighted.</p>
     <p class="small muted"><span class="late">Amber</span> Emitted time: reported later than it became true. Duration alerts fire
       only when the next line arrives (or at end of input), so they are reported after their deadline.</p>
+    <div class="filters" id="notification-filters"></div>
     <div class="table-wrap" id="notifications"></div>
   </section>
 
@@ -186,6 +187,7 @@ const ENABLED_NOTE =
 let highlighted = new Set();  // notification seqs added by the last Step (Run All highlights nothing)
 let lastStatus = null;        // the status as last drawn; Run All uses it to describe what it processed
 let incidentFilter = "all";
+let notificationRecipient = "all";  // display-only filter; kept across redraws, reset by a full page reload
 
 // Build an element. Text is always set with textContent, never parsed as HTML.
 function el(tag, props = {}, ...children) {
@@ -449,10 +451,21 @@ function renderIncidents(incidents) {
     incidents.length ? `No ${incidentFilter} incidents.` : "No incidents yet."));
 }
 
-function renderNotifications(rows) {
+// Filtering hides rows only: "#" stays the global sequence number and the replay counts are untouched.
+// focusFilter is true only when a filter button was activated, so keyboard focus stays on it after the redraw.
+function renderNotifications(rows, focusFilter = false) {
+  const counts = { all: rows.length };
+  for (const lead of LEADS) counts[lead] = rows.filter(n => n.recipient === lead).length;
+  const filters = document.getElementById("notification-filters");
+  filters.replaceChildren(...["all", ...LEADS].map(f =>
+    el("button", { type: "button", "aria-pressed": String(f === notificationRecipient), "data-recipient": f,
+                   onclick: () => { notificationRecipient = f; renderNotifications(rows, true); } },
+       `${f === "all" ? "All recipients" : f} (${counts[f]})`)));
+  if (focusFilter) filters.querySelector('[aria-pressed="true"]').focus();
+  const shown = rows.filter(n => notificationRecipient === "all" || n.recipient === notificationRecipient);
   document.getElementById("notifications").replaceChildren(table(
     ["#", "Line", "Rule (version)", "Subject", "Recipient", "Kind", "Severity", "Effective (UTC)", "Emitted (UTC)"],
-    rows.map(n => {
+    shown.map(n => {
       const lag = (Date.parse(n.emitted_at) - Date.parse(n.effective_at)) / 1000;
       const emitted = lag > 0
         ? el("td", { class: "late", title: `Reported ${delay(lag)} after it became true` }, hm(n.emitted_at))
@@ -468,7 +481,7 @@ function renderNotifications(rows) {
         el("td", {}, hm(n.effective_at)),
         emitted);
     }),
-    "No notifications yet. Press Step or Run All."));
+    rows.length ? `No notifications for ${notificationRecipient} yet.` : "No notifications yet. Press Step or Run All."));
 }
 
 function renderDiagnostics(rows) {

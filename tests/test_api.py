@@ -785,3 +785,22 @@ def test_page_offers_the_recovery_threshold_field(client: TestClient) -> None:
     assert RECOVERY_LABEL in page
     assert RECOVERY_HINT in page
     assert "resolve_at_or_below" in page
+
+
+# ---------------------------------------------------------------------------
+# K. Review fix — recipient filter on the notifications table (UI only)
+# ---------------------------------------------------------------------------
+
+
+def test_page_offers_the_recipient_filter(client: TestClient) -> None:
+    page = client.get("/").text
+    for marker in ('id="notification-filters"', "All recipients", "No notifications for"):
+        assert marker in page, marker
+
+
+def test_recipient_query_is_ignored_by_the_api(client: TestClient) -> None:
+    # Filtering happens in the browser only; the API keeps returning every notification.
+    ok(client.post("/replay/run-all"))
+    everyone = ok(client.get("/notifications"))
+    assert len(everyone) == 20
+    assert ok(client.get("/notifications", params={"recipient": "lead_support"})) == everyone
