@@ -121,3 +121,9 @@ Each entry: decision — one-line reasoning.
 93. **Only a single Step highlights its new notifications; Run All highlights nothing and reports how many lines it processed and which notification numbers it added.** — Highlighting a whole run marks every row, which carries no information.
 94. **Times are labelled UTC, and Emitted is amber (with a "reported N after it became true" tooltip) whenever it is later than Effective.** — Source timestamps are UTC; the colour makes the replay's timer lag visible without reading every row.
 95. **Refines Decision 91: the replay bar is sticky only at widths of 1240 px and above. Measured with its widest content, it fits on one row from 1226 px; narrower, it wraps onto two rows (about 100 px), so it scrolls with the page instead.** — A two-row sticky bar covers too much content at medium widths.
+
+## Phase 5 — packaging and submission (5.1 implemented)
+
+96. **`.python-version` pins Python 3.12, uv is the main setup path, and `uv.lock` is committed.** — Anyone running `uv sync` gets the exact dependency versions the test suite passed with.
+97. **`pyproject.toml` has a minimal Hatchling `[build-system]` (`packages = ["alerts"]`), and the pip fallback is `pip install -e ".[dev]"`. The install must be editable.** — One dependency list instead of a second hand-written one; `api.py` finds `data/events.jsonl` relative to the package, which only exists in the repo, not in site-packages. pip still resolves unpinned versions within the stated ranges.
+98. **Duration thresholds stay inclusive (`>=`, Decision 34), although the assignment's examples say "more than" and "over".** — With strict timer firing the difference mostly shows in the reported effective time; notification #20 (a_23 at exactly 45:00 at the 10:30 horizon) depends on it, so changing it would change the oracle.

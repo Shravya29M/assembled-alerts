@@ -7,6 +7,7 @@ lead_support; a_07, a_19 and billing belong to lead_billing.
 import pytest
 
 from alerts.engine import Engine, ReplayFinishedError
+from alerts.ingest import SourcedEvent
 from alerts.routing import seeded_rules
 from tests.builders import adherence, at, snapshot, state_change
 from tests.engine_builders import Driver, brief, edited, engine_snapshot, seeded
@@ -98,6 +99,26 @@ def test_duplicate_with_later_ts_does_not_fire() -> None:
     assert driver.send(duplicate) == []
     assert driver.engine.state.clock == at("09:50")
     assert driver.engine.pending_timers() == {(LONG_A11, "a_11"): at("09:55")}
+
+
+def test_stale_snapshot_that_would_alert_is_ignored_by_the_engine() -> None:
+    # Control: on its own, this snapshot opens a critical backlog alert (30 > 20).
+    would_alert = snapshot("09:50", "billing", tickets_waiting=30)
+    control = Driver()
+    assert brief(control.send(would_alert)) == [
+        ("backlog.lead_billing", "billing", "opened", "critical", "09:50", "09:50"),
+    ]
+
+    # After a newer billing snapshot, the same evidence is stale and changes nothing.
+    engine = Engine(seeded_rules())
+    newer = engine.step(SourcedEvent(1, snapshot("10:00", "billing", tickets_waiting=3)))
+    stale = engine.step(SourcedEvent(2, snapshot("09:50", "billing", tickets_waiting=30)))
+    assert (newer.outcome, stale.outcome) == ("accepted", "stale")
+    assert stale.notifications == []
+    assert engine.notifications == []
+    assert engine.incidents == {}
+    assert engine.state.clock == at("10:00")
+    assert engine.state.queues["billing"].tickets_waiting == 3
 
 
 def test_adherence_clear_cancels_timer() -> None:
